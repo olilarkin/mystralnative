@@ -157,7 +157,9 @@ jobs:
   # =============================================================================
   build-linux:
     if: ${{ inputs.build_filter == 'all' || inputs.build_filter == 'linux-only' }}
-    runs-on: ubuntu-24.04
+    # Use Ubuntu 20.04 for maximum glibc compatibility (glibc 2.31)
+    # This allows binaries to run on most Linux distros from the last 5 years
+    runs-on: ubuntu-20.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -427,13 +429,16 @@ jobs:
           export PATH="/c/Program Files/7-Zip:$PATH"
           node scripts/download-deps.mjs --only v8
 
-      - name: Download static Skia+Dawn for Windows Dawn builds
+      - name: Download Dawn for Windows builds
         if: steps.cache-deps.outputs.cache-hit != 'true'
         shell: bash
         run: |
           export PATH="/c/Program Files/7-Zip:$PATH"
-          # Use skia-win-static which includes dawn_combined.lib with /MT (static CRT)
-          node scripts/download-deps.mjs --only skia-win-static --force
+          # Download official Dawn release (has webgpu_dawn.lib with actual implementation)
+          # Note: dawn_combined.lib from skia-win-static only has proc stubs
+          node scripts/download-deps.mjs --only dawn
+          # Also get Skia static for /MT CRT compatibility
+          node scripts/download-deps.mjs --only skia-win-static
 
       - name: Install vcpkg dependencies
         run: |
