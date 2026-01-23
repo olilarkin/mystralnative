@@ -301,15 +301,14 @@ jobs:
         shell: bash
         run: |
           export PATH="/c/Program Files/7-Zip:$PATH"
-          node scripts/download-deps.mjs --only dawn
+          # Use skia-win-static which includes both Skia and Dawn built with /MT
+          # This avoids CRT mismatch between Skia (/MT) and regular Dawn (/MD)
+          node scripts/download-deps.mjs --only skia-win-static
 
       - name: Install vcpkg dependencies
         run: |
-          if ("${{ matrix.webgpu }}" -eq "wgpu") {
-            vcpkg install curl:x64-windows-static zlib:x64-windows-static
-          } else {
-            vcpkg install curl:x64-windows zlib:x64-windows
-          }
+          # Both wgpu and dawn builds use static CRT (/MT) to match Skia
+          vcpkg install curl:x64-windows-static zlib:x64-windows-static
           vcpkg integrate install
 
       - name: Configure CMake
@@ -322,11 +321,12 @@ jobs:
           }
           if ("${{ matrix.webgpu }}" -eq "wgpu") {
             $CMAKE_ARGS += "-DMYSTRAL_USE_WGPU=ON", "-DMYSTRAL_USE_DAWN=OFF"
-            $CMAKE_ARGS += "-DVCPKG_TARGET_TRIPLET=x64-windows-static"
-            $CMAKE_ARGS += "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded"
           } elseif ("${{ matrix.webgpu }}" -eq "dawn") {
             $CMAKE_ARGS += "-DMYSTRAL_USE_WGPU=OFF", "-DMYSTRAL_USE_DAWN=ON"
           }
+          # Use static CRT (/MT) to match Skia prebuilt libraries
+          $CMAKE_ARGS += "-DVCPKG_TARGET_TRIPLET=x64-windows-static"
+          $CMAKE_ARGS += "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded"
           $CMAKE_ARGS += "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
           cmake @CMAKE_ARGS
 
