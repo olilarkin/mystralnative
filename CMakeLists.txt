@@ -390,6 +390,8 @@ if(MYSTRAL_USE_QUICKJS)
             # Suppress warnings in third-party code
             if(MSVC)
                 target_compile_options(quickjs PRIVATE /W0)
+                # Enable C11 for MSVC - required for C11 atomics used by QuickJS
+                target_compile_options(quickjs PRIVATE /std:c11)
                 # WIN32_LEAN_AND_MEAN prevents winsock.h from being included
                 # via windows.h, avoiding conflicts with winsock2.h
                 target_compile_definitions(quickjs PRIVATE WIN32_LEAN_AND_MEAN)
