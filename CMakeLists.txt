@@ -250,11 +250,12 @@ if(MYSTRAL_USE_DAWN)
 
             if(EXISTS ${DAWN_LIB_PATH})
                 set(DAWN_LIBRARY ${DAWN_LIB_PATH})
-                # Dawn headers are included in Skia's include directory
-                # (webgpu/webgpu.h, dawn/webgpu.h, etc.)
-                set(DAWN_INCLUDE_DIR ${SKIA_INCLUDE_DIR})
+                # Dawn headers are in Skia's third_party/externals/dawn subdirectory
+                # The path structure is: build/include/third_party/externals/dawn/include/webgpu/webgpu.h
+                set(DAWN_INCLUDE_DIR ${SKIA_TARGET_DIR}/build/include/third_party/externals/dawn/include)
                 set(DAWN_FOUND ON)
                 message(STATUS "Found Dawn combined library from Skia build")
+                message(STATUS "Dawn includes: ${DAWN_INCLUDE_DIR}")
             else()
                 message(WARNING "dawn_combined.lib not found in Skia build at ${DAWN_LIB_PATH}")
                 message(WARNING "Run 'node scripts/download-deps.mjs --only skia-win-static' first.")
