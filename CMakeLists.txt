@@ -10,6 +10,12 @@ endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Windows: Use static CRT (/MT) to match prebuilt dependencies like Skia
+# Without this, we get LNK2038 "RuntimeLibrary mismatch" errors
+if(WIN32 AND MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 # ============================================================================
 # Options
 # ============================================================================
@@ -384,6 +390,9 @@ if(MYSTRAL_USE_QUICKJS)
             # Suppress warnings in third-party code
             if(MSVC)
                 target_compile_options(quickjs PRIVATE /W0)
+                # WIN32_LEAN_AND_MEAN prevents winsock.h from being included
+                # via windows.h, avoiding conflicts with winsock2.h
+                target_compile_definitions(quickjs PRIVATE WIN32_LEAN_AND_MEAN)
             else()
                 target_compile_options(quickjs PRIVATE -w)
             endif()
