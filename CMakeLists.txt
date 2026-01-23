@@ -338,8 +338,8 @@ if(MYSTRAL_USE_DAWN)
     if(DAWN_FOUND)
         add_library(dawn::webgpu STATIC IMPORTED)
         set_target_properties(dawn::webgpu PROPERTIES
-            IMPORTED_LOCATION ${DAWN_LIBRARY}
-            INTERFACE_INCLUDE_DIRECTORIES ${DAWN_INCLUDE_DIR}
+            IMPORTED_LOCATION "${DAWN_LIBRARY}"
+            INTERFACE_INCLUDE_DIRECTORIES "${DAWN_INCLUDE_DIR}"
         )
         # Only define MYSTRAL_WEBGPU_DAWN if wgpu-native wasn't already set up
         # (can't have both WebGPU backends active)
