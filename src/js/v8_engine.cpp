@@ -146,6 +146,9 @@ public:
             return false;
         }
 
+        // Register the entry module for reverse lookup (needed when this module imports others)
+        moduleIdToPath_[module->GetIdentityHash()] = filename;
+
         auto resolveCallback = &V8Engine::moduleResolveCallback;
 
         // Instantiate the module
@@ -186,6 +189,9 @@ public:
             reportException(try_catch);
             return {nullptr, isolate_};
         }
+
+        // Register the entry module for reverse lookup (needed when this module imports others)
+        moduleIdToPath_[module->GetIdentityHash()] = filename;
 
         auto resolveCallback = &V8Engine::moduleResolveCallback;
 
@@ -812,9 +818,10 @@ private:
 
         std::string spec = toStdString(context->GetIsolate(), specifier);
         std::string referrerName;
-        v8::Local<v8::Value> refNameVal = referrer->GetScriptOrigin().ResourceName();
-        if (!refNameVal.IsEmpty()) {
-            referrerName = toStdString(context->GetIsolate(), refNameVal);
+        // v8::Module doesn't have GetScriptOrigin(), so we use a reverse lookup map
+        auto pathIt = moduleIdToPath_.find(referrer->GetIdentityHash());
+        if (pathIt != moduleIdToPath_.end()) {
+            referrerName = pathIt->second;
         }
 
         ResolvedModule resolved;
@@ -852,6 +859,7 @@ private:
         }
 
         moduleCache_[resolved.resolved.path].Reset(context->GetIsolate(), module);
+        moduleIdToPath_[module->GetIdentityHash()] = resolved.resolved.path;
         return module;
     }
 
@@ -1006,6 +1014,7 @@ private:
     std::string lastException_;
     std::chrono::high_resolution_clock::time_point startTime_;
     std::unordered_map<std::string, v8::Global<v8::Module>> moduleCache_;
+    std::unordered_map<int, std::string> moduleIdToPath_;  // Reverse lookup: module hash -> path
 };
 
 // Factory function
