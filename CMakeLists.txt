@@ -243,14 +243,6 @@ if(MYSTRAL_USE_DAWN)
         # Windows: Look for dawn_combined.lib in the Skia build directory
         # The skia-win-static dependency from library-builder includes Dawn with full
         # D3D11/D3D12 backends, built with /MT static CRT to match Skia
-        #
-        # Note: We need to set up Skia paths here since Dawn depends on them,
-        # but Skia setup happens later in the CMakeLists.txt
-        set(SKIA_DIR ${THIRD_PARTY_DIR}/skia)
-        set(SKIA_TARGET_DIR ${SKIA_DIR})
-        set(SKIA_PLATFORM_DIR "win-gpu")
-        set(SKIA_LIB_SUBDIR "x64")
-
         if(EXISTS ${SKIA_TARGET_DIR})
             # dawn_combined.lib is in the same directory as skia.lib
             set(DAWN_LIB_PATH ${SKIA_TARGET_DIR}/build/${SKIA_PLATFORM_DIR}/lib/Release/${SKIA_LIB_SUBDIR}/dawn_combined.lib)
@@ -258,10 +250,14 @@ if(MYSTRAL_USE_DAWN)
 
             if(EXISTS ${DAWN_LIB_PATH})
                 set(DAWN_LIBRARY ${DAWN_LIB_PATH})
-                # Dawn headers are at build/include/dawn/*.h
-                # WebGPU wrapper headers are at build/include/webgpu/*.h (created by CI)
-                # Both are resolved from a single include path
-                set(DAWN_INCLUDE_DIR ${SKIA_TARGET_DIR}/build/include)
+                # Dawn headers in Skia build are split across two locations:
+                # 1. build/include/third_party/externals/dawn/include/webgpu/webgpu.h (wrapper)
+                # 2. build/include/dawn/webgpu.h (actual definitions)
+                # The wrapper includes "dawn/webgpu.h", so we need both paths
+                set(DAWN_INCLUDE_DIR
+                    ${SKIA_TARGET_DIR}/build/include/third_party/externals/dawn/include
+                    ${SKIA_TARGET_DIR}/build/include
+                )
                 set(DAWN_FOUND ON)
                 message(STATUS "Found Dawn combined library from Skia build")
                 message(STATUS "Dawn includes: ${DAWN_INCLUDE_DIR}")
