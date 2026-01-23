@@ -410,7 +410,7 @@ jobs:
           node scripts/download-deps.mjs --only skia-win-static
 
       - name: Create WebGPU wrapper headers
-        if: steps.cache-deps.outputs.cache-hit != 'true'
+        # Always run this - wrapper headers are not in the cache, only downloaded deps
         shell: bash
         run: |
           # library-builder Skia only has dawn/*.h headers, but code expects webgpu/*.h
