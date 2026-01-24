@@ -98,6 +98,9 @@ window.addEventListener("gamepadconnected", (e) => {
 # Full 3D scene with PBR lighting (Dawn builds only)
 ./mystral run examples/mystral-helmet.js
 
+# Day/night cycle demo with atmosphere
+./mystral run examples/daynight.js
+
 # Custom window size
 ./mystral run examples/simple-cube.js --width 1920 --height 1080
 
@@ -114,6 +117,7 @@ window.addEventListener("gamepadconnected", (e) => {
 | `test-audio.js` | Web Audio API test |
 | `test-gamepad.js` | Gamepad API test |
 | `mystral-helmet.js` | Full Mystral Engine with DamagedHelmet model |
+| `daynight.js` | Day/night cycle with atmosphere, stars, moon, torches |
 
 Sample 3D models included in `examples/assets/`:
 - `DamagedHelmet.glb` - Khronos sample model
