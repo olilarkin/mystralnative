@@ -348,6 +348,8 @@ jobs:
             $CMAKE_ARGS += "-DMYSTRAL_USE_QUICKJS=ON", "-DMYSTRAL_USE_V8=OFF", "-DMYSTRAL_USE_JSC=OFF"
           } elseif ("${{ matrix.js_engine }}" -eq "v8") {
             $CMAKE_ARGS += "-DMYSTRAL_USE_QUICKJS=OFF", "-DMYSTRAL_USE_V8=ON", "-DMYSTRAL_USE_JSC=OFF"
+            # V8 requires C++20
+            $CMAKE_ARGS += "-DCMAKE_CXX_STANDARD=20"
           }
 
           # WebGPU backend - wgpu with static CRT (/MT)
@@ -475,6 +477,8 @@ jobs:
             $CMAKE_ARGS += "-DMYSTRAL_USE_QUICKJS=ON", "-DMYSTRAL_USE_V8=OFF", "-DMYSTRAL_USE_JSC=OFF"
           } elseif ("${{ matrix.js_engine }}" -eq "v8") {
             $CMAKE_ARGS += "-DMYSTRAL_USE_QUICKJS=OFF", "-DMYSTRAL_USE_V8=ON", "-DMYSTRAL_USE_JSC=OFF"
+            # V8 requires C++20
+            $CMAKE_ARGS += "-DCMAKE_CXX_STANDARD=20"
           }
 
           # WebGPU backend - Dawn with static CRT (/MT)
