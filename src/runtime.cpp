@@ -507,6 +507,25 @@ public:
             return false;
         }
 
+        // Store script path for reloading
+        scriptPath_ = path;
+
+        // Set up file watching if watch mode is enabled
+        if (config_.watch && fs::getFileWatcher().isReady()) {
+            if (watchId_ >= 0) {
+                fs::getFileWatcher().unwatch(watchId_);
+            }
+            watchId_ = fs::getFileWatcher().watch(path, [this](const std::string& changedPath, fs::FileChangeType type) {
+                if (type == fs::FileChangeType::Modified || type == fs::FileChangeType::Renamed) {
+                    std::cout << "[HotReload] File changed: " << changedPath << std::endl;
+                    reloadRequested_ = true;
+                }
+            });
+            if (watchId_ >= 0) {
+                std::cout << "[HotReload] Watching for changes: " << path << std::endl;
+            }
+        }
+
         return moduleSystem_->loadEntry(path);
     }
 
@@ -521,6 +540,75 @@ public:
 
         return jsEngine_->evalScript(code.c_str(), filename.c_str());
     }
+
+    bool reloadScript() override {
+        if (scriptPath_.empty()) {
+            std::cerr << "[HotReload] No script loaded to reload" << std::endl;
+            return false;
+        }
+
+        std::cout << "[HotReload] Reloading script: " << scriptPath_ << std::endl;
+
+        // Clear all pending timers
+        clearAllTimers();
+
+        // Clear all requestAnimationFrame callbacks
+        for (auto& raf : rafCallbacks_) {
+            jsEngine_->unprotect(raf.callback);
+        }
+        rafCallbacks_.clear();
+
+        // Clear module caches so script is re-read from disk
+        if (moduleSystem_) {
+            moduleSystem_->clearCaches();
+        }
+
+        // Reload the script
+        bool success = moduleSystem_->loadEntry(scriptPath_);
+
+        if (success) {
+            std::cout << "[HotReload] Script reloaded successfully" << std::endl;
+        } else {
+            std::cerr << "[HotReload] Failed to reload script" << std::endl;
+        }
+
+        return success;
+    }
+
+private:
+    void clearAllTimers() {
+#ifdef MYSTRAL_USE_LIBUV_TIMERS
+        // Stop and clean up all libuv timers
+        for (auto& [id, ctx] : uvTimers_) {
+            if (ctx && !ctx->cancelled) {
+                ctx->cancelled = true;
+                uv_timer_stop(&ctx->handle);
+                jsEngine_->unprotect(ctx->callback);
+                uv_close(reinterpret_cast<uv_handle_t*>(&ctx->handle), onTimerClose);
+            }
+        }
+        // Note: Don't clear uvTimers_ here - onTimerClose will do that
+        cancelledTimerIds_.clear();
+        {
+            std::lock_guard<std::mutex> lock(timerMutex_);
+            while (!pendingTimerCallbacks_.empty()) {
+                pendingTimerCallbacks_.pop();
+            }
+        }
+#else
+        // Clear std::chrono-based timers
+        for (auto& timer : timerCallbacks_) {
+            if (!timer.cancelled) {
+                jsEngine_->unprotect(timer.callback);
+            }
+        }
+        timerCallbacks_.clear();
+        cancelledTimerIds_.clear();
+#endif
+        nextTimerId_ = 1;
+    }
+
+public:
 
     // ========================================================================
     // Main Loop
@@ -617,6 +705,12 @@ public:
 
         // Process file watch events (for hot reload)
         fs::getFileWatcher().processPendingEvents();
+
+        // Check if hot reload was requested
+        if (reloadRequested_) {
+            reloadRequested_ = false;
+            reloadScript();
+        }
 
         // Execute timer callbacks (setTimeout, setInterval)
         executeTimerCallbacks();
@@ -2082,6 +2176,11 @@ globalThis.loadGLTF = loadGLTF;
 
     // Cached canvas element (created once, returned by getElementById)
     js::JSValueHandle canvasElement_;
+
+    // Hot reload state
+    std::string scriptPath_;  // Path to the currently loaded script
+    int watchId_ = -1;        // File watcher ID (-1 if not watching)
+    bool reloadRequested_ = false;  // Set when a file change is detected
 
     void setupDOMEvents() {
         if (!jsEngine_) return;

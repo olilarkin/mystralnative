@@ -119,6 +119,26 @@ Sample 3D models included in `examples/assets/`:
 - `DamagedHelmet.glb` - Khronos sample model
 - `environment.hdr` - HDR environment map for IBL lighting
 
+## Hot Reload (Watch Mode)
+
+Enable automatic script reloading during development with `--watch` or `-w`:
+
+```bash
+# Watch for file changes and reload automatically
+./mystral run game.js --watch
+
+# Combine with other options
+./mystral run game.js -w --width 1920 --height 1080
+```
+
+When the watched file changes:
+1. All timers (setTimeout/setInterval) are cleared
+2. All requestAnimationFrame callbacks are cancelled
+3. Module caches are cleared
+4. The script is re-executed from scratch
+
+This enables fast iteration during development without restarting the runtime.
+
 ## Bundling for Distribution
 
 Package your game into a single executable:

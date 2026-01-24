@@ -80,12 +80,25 @@ static void onFileChange(uv_fs_event_t* handle, const char* filename, int events
     }
 
     // Build full path
+    // For files: filename is the basename, ctx->path is the full path - use ctx->path
+    // For directories: filename is the changed file within the directory
     std::string fullPath = ctx->path;
     if (filename && filename[0] != '\0') {
-        if (!fullPath.empty() && fullPath.back() != '/') {
-            fullPath += '/';
+        // Check if ctx->path is a directory (ends with / or is watching a dir)
+        // If watching a single file, filename equals the basename - don't append
+        std::string ctxBasename = ctx->path;
+        auto lastSlash = ctxBasename.find_last_of('/');
+        if (lastSlash != std::string::npos) {
+            ctxBasename = ctxBasename.substr(lastSlash + 1);
         }
-        fullPath += filename;
+        if (ctxBasename != filename) {
+            // We're watching a directory, append the changed filename
+            if (!fullPath.empty() && fullPath.back() != '/') {
+                fullPath += '/';
+            }
+            fullPath += filename;
+        }
+        // else: watching a file, fullPath is already correct
     }
 
     // Queue the event for main thread processing

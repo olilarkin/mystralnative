@@ -17,6 +17,7 @@ struct RuntimeConfig {
     bool vsync = true;
     bool resizable = true;
     bool noSdl = false;  // Run without SDL (headless GPU mode, no window)
+    bool watch = false;  // Watch mode: reload script on file changes
 };
 
 /**
@@ -59,6 +60,13 @@ public:
      * @return true on success
      */
     virtual bool evalScript(const std::string& code, const std::string& filename = "<eval>") = 0;
+
+    /**
+     * Reload the currently loaded script (for hot reload)
+     * Clears timers and requestAnimationFrame callbacks, then re-evaluates the script.
+     * @return true on success
+     */
+    virtual bool reloadScript() = 0;
 
     // ========================================================================
     // Main Loop
