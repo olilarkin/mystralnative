@@ -101,6 +101,9 @@ window.addEventListener("gamepadconnected", (e) => {
 # Day/night cycle demo with atmosphere
 ./mystral run examples/daynight.js
 
+# Sponza palace with day/night, torches, fireflies (Dawn builds only)
+./mystral run examples/sponza.js
+
 # Custom window size
 ./mystral run examples/simple-cube.js --width 1920 --height 1080
 
@@ -118,9 +121,11 @@ window.addEventListener("gamepadconnected", (e) => {
 | `test-gamepad.js` | Gamepad API test |
 | `mystral-helmet.js` | Full Mystral Engine with DamagedHelmet model |
 | `daynight.js` | Day/night cycle with atmosphere, stars, moon, torches |
+| `sponza.js` | Sponza palace with day/night cycle, torches, fireflies |
 
 Sample 3D models included in `examples/assets/`:
 - `DamagedHelmet.glb` - Khronos sample model
+- `Sponza.glb` - Intel Sponza palace model
 - `environment.hdr` - HDR environment map for IBL lighting
 
 ## Hot Reload (Watch Mode)
