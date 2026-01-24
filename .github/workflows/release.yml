@@ -143,8 +143,8 @@ jobs:
   # Linux Builds
   # =============================================================================
   build-linux:
-    # Use Ubuntu 22.04 for broader glibc compatibility (2.35 vs 2.38/2.39 on 24.04)
-    runs-on: ubuntu-22.04
+    # Use Ubuntu 24.04 to match CI and prebuilt libuv dependencies (glibc 2.39)
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
