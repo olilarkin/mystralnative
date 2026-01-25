@@ -8,8 +8,7 @@
 #include "mystral/http/async_http_client.h"
 #include "mystral/fs/async_file.h"
 #include "mystral/fs/file_watcher.h"
-// DEPRECATED: Native GLTF loading disabled - use JS GLBLoader/GLTFLoader instead
-// #include "mystral/gltf/gltf_loader.h"
+#include "mystral/gltf/gltf_loader.h"
 #include "mystral/audio/audio_bindings.h"
 #include "mystral/vfs/embedded_bundle.h"
 #include "mystral/async/event_loop.h"
@@ -379,8 +378,9 @@ public:
         // Set up DOM event system (document, window, addEventListener, etc.)
         setupDOMEvents();
 
-        // DEPRECATED: Native GLTF loading disabled - use JS GLBLoader/GLTFLoader instead
-        // setupGLTF();
+        // Set up native GLTF loading API
+        // This provides loadGLTF() for loading .glb/.gltf files from local paths
+        setupGLTF();
 
         // Set up Web Audio API bindings (skip in no-SDL mode - audio requires SDL)
         if (!config_.noSdl) {
@@ -1689,10 +1689,6 @@ globalThis.Response = Response;
         );
     }
 
-    // DEPRECATED: Native GLTF loading disabled - use JS GLBLoader/GLTFLoader instead
-    // The setupGLTF function is preserved but disabled. Use the JavaScript loaders from
-    // the Mystral web engine (src/loaders/GLBLoader.ts, src/loaders/GLTFLoader.ts) instead.
-#if 0
     void setupGLTF() {
         if (!jsEngine_) return;
 
@@ -1968,7 +1964,6 @@ globalThis.loadGLTF = loadGLTF;
         jsEngine_->eval(gltfPolyfill, "gltf-polyfill.js");
         std::cout << "[Mystral] GLTF loader initialized" << std::endl;
     }
-#endif // DEPRECATED native GLTF loading
 
     void executeTimerCallbacks() {
 #ifdef MYSTRAL_USE_LIBUV_TIMERS

@@ -35,8 +35,8 @@
 #include <webp/decode.h>
 #endif
 
-// DEPRECATED: Native GLTF loading disabled - use JS GLBLoader/GLTFLoader instead
-// #include "mystral/gltf/gltf_loader.h"
+// GLTF/GLB loader
+#include "mystral/gltf/gltf_loader.h"
 
 // Canvas 2D context (Skia-backed)
 #include "mystral/canvas/canvas2d.h"
@@ -3481,14 +3481,11 @@ globalThis.ImageBitmap = ImageBitmap;
     engine->eval(imageBitmapPolyfill, "imageBitmap-polyfill.js");
 
     // =========================================================================
-    // Mystral namespace - for engine-specific functions
+    // Mystral.loadGLTF() - GLTF/GLB file loader
     // =========================================================================
+    // Returns parsed GLTF data as JavaScript object
     auto mystralNamespace = engine->newObject();
 
-    // DEPRECATED: Native GLTF loading disabled - use JS GLBLoader/GLTFLoader instead
-    // The loadGLTF function has been removed. Use the JavaScript loaders from
-    // the Mystral web engine (src/loaders/GLBLoader.ts, src/loaders/GLTFLoader.ts) instead.
-#if 0
     engine->setProperty(mystralNamespace, "loadGLTF",
         engine->newFunction("loadGLTF", [](void* ctx, const std::vector<js::JSValueHandle>& args) {
             if (args.empty()) {
@@ -3719,7 +3716,6 @@ globalThis.ImageBitmap = ImageBitmap;
             return result;
         })
     );
-#endif // DEPRECATED native GLTF loading
 
     engine->setGlobalProperty("Mystral", mystralNamespace);
 

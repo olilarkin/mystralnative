@@ -50,6 +50,12 @@ The JS `GLBLoader` does not currently support Draco-compressed meshes (`KHR_drac
 
 **Task**: "Support Draco compression" is on the roadmap.
 
+**Note on loaders.gl**: We intentionally avoid using loaders.gl for GLTF loading because:
+1. It's a large dependency that causes bundle bloat
+2. It uses DOM methods like `Image()` which aren't available in the native runtime
+
+The preferred approach is to implement Draco WASM decoding directly in our own GLBLoader.
+
 ## Build Configuration
 
 The project uses CMake with several options:

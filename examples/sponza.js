@@ -40512,7 +40512,7 @@ class GLBLoader {
     this.textures.clear();
     this.materials.clear();
     if (gltf.textures && gltf.images) {
-      await this.loadTextures(gltf, binChunk);
+      await this.loadTextures(gltf, binChunk, baseUrl);
     }
     if (gltf.materials) {
       this.loadMaterials(gltf);
@@ -40520,18 +40520,32 @@ class GLBLoader {
     const rootNode = this.buildSceneGraph(gltf, binChunk);
     return { rootNode };
   }
-  async loadTextures(gltf, binChunk) {
+  async loadTextures(gltf, binChunk, baseUrl) {
     if (!gltf.textures || !gltf.images)
       return;
+    let basePath = "";
+    if (baseUrl) {
+      const lastSlash = baseUrl.lastIndexOf("/");
+      if (lastSlash >= 0) {
+        basePath = baseUrl.substring(0, lastSlash + 1);
+      }
+    }
     for (let i = 0;i < gltf.textures.length; i++) {
       const texDef = gltf.textures[i];
-      if (texDef.source === undefined)
-        continue;
-      const imgDef = gltf.images[texDef.source];
-      if (!imgDef)
-        continue;
+      let imageSource = texDef.source;
+      if (imageSource === undefined && texDef.extensions?.EXT_texture_webp?.source !== undefined) {
+        imageSource = texDef.extensions.EXT_texture_webp.source;
+      }
+      if (imageSource === undefined) {
+        return;
+      }
+      const imgDef = gltf.images[imageSource];
+      if (!imgDef) {
+        return;
+      }
       try {
         let imageData = null;
+        let mimeType = imgDef.mimeType || "image/png";
         if (imgDef.bufferView !== undefined && binChunk) {
           const bufferView = gltf.bufferViews[imgDef.bufferView];
           const start = bufferView.byteOffset || 0;
@@ -40545,10 +40559,30 @@ class GLBLoader {
               bytes[j] = binary.charCodeAt(j);
             }
             imageData = bytes.buffer;
+          } else {
+            const imageUrl = basePath + imgDef.uri;
+            try {
+              const response = await fetch(imageUrl);
+              if (response.ok) {
+                imageData = await response.arrayBuffer();
+                if (!imgDef.mimeType) {
+                  if (imgDef.uri.endsWith(".webp"))
+                    mimeType = "image/webp";
+                  else if (imgDef.uri.endsWith(".png"))
+                    mimeType = "image/png";
+                  else if (imgDef.uri.endsWith(".jpg") || imgDef.uri.endsWith(".jpeg"))
+                    mimeType = "image/jpeg";
+                }
+              } else {
+                console.warn(`GLBLoader: Failed to fetch texture ${imgDef.uri}: ${response.status}`);
+              }
+            } catch (fetchErr) {
+              console.warn(`GLBLoader: Error fetching texture ${imgDef.uri}:`, fetchErr);
+            }
           }
         }
         if (imageData) {
-          const blob = new Blob([imageData], { type: imgDef.mimeType || "image/png" });
+          const blob = new Blob([imageData], { type: mimeType });
           const bitmap = await createImageBitmap(blob);
           const isSrgb = this.isColorTexture(gltf, i);
           const texture = new Texture(`GLB Texture ${i}`, { srgb: isSrgb });
@@ -40770,9 +40804,48 @@ class GLBLoader {
     }
     const byteOffset = (bufferView.byteOffset || 0) + (accessor.byteOffset || 0);
     const elementCount = accessor.count * typeSize;
+    const componentByteSize = componentInfo.size;
+    const elementByteSize = componentByteSize * typeSize;
+    const byteStride = bufferView.byteStride;
     const ArrayType = componentInfo.array;
-    const data = new ArrayType(binChunk, byteOffset, elementCount);
-    return data;
+    if (byteStride && byteStride !== elementByteSize) {
+      const result = new ArrayType(elementCount);
+      const dataView = new DataView(binChunk);
+      for (let i = 0;i < accessor.count; i++) {
+        const elementOffset = byteOffset + i * byteStride;
+        for (let j = 0;j < typeSize; j++) {
+          const componentOffset = elementOffset + j * componentByteSize;
+          let value;
+          switch (accessor.componentType) {
+            case 5120:
+              value = dataView.getInt8(componentOffset);
+              break;
+            case 5121:
+              value = dataView.getUint8(componentOffset);
+              break;
+            case 5122:
+              value = dataView.getInt16(componentOffset, true);
+              break;
+            case 5123:
+              value = dataView.getUint16(componentOffset, true);
+              break;
+            case 5125:
+              value = dataView.getUint32(componentOffset, true);
+              break;
+            case 5126:
+              value = dataView.getFloat32(componentOffset, true);
+              break;
+            default:
+              value = 0;
+          }
+          result[i * typeSize + j] = value;
+        }
+      }
+      return result;
+    } else {
+      const data = new ArrayType(binChunk, byteOffset, elementCount);
+      return data;
+    }
   }
 }
 async function loadGLBModel(device, url) {
@@ -46814,7 +46887,7 @@ async function main() {
   } catch (e) {
     console.log("Failed to load Sponza:", e.message || e);
   }
-  const sunLight = new DirectionalLight(new Vector3(1, 0.95, 0.8), 2);
+  const sunLight = new DirectionalLight(new Vector3(1, 0.95, 0.8), 4);
   sunLight.transform.position = new Vector3(20, 50, 10);
   sunLight.transform.lookAt(new Vector3(0, 0, 0));
   sunLight.shadow.castShadow = true;
@@ -46831,7 +46904,7 @@ async function main() {
   moonLight.shadow.intensity = 0.95;
   scene.addLight(moonLight);
   console.log("Moon light added");
-  const ambientLight = new AmbientLight(new Vector3(1, 1, 1), 0.15);
+  const ambientLight = new AmbientLight(new Vector3(1, 1, 1), 0.6);
   scene.addLight(ambientLight);
   console.log("Ambient light added");
   const torchPositions = [
@@ -46897,7 +46970,7 @@ async function main() {
   const controller = new WASDController(camera);
   controller.movementSpeed = 10;
   console.log("WASD Controller initialized - use WASD to move, mouse to look");
-  let timeOfDay = 6;
+  let timeOfDay = 12;
   const cycleSpeed = 1;
   let fireflyTime = 0;
   const moonPhase = 0.5;
