@@ -104,6 +104,10 @@ public:
             delete handle;
         }
         frameHandles_.clear();
+        for (auto* fn : frameNativeFunctions_) {
+            delete fn;
+        }
+        frameNativeFunctions_.clear();
         for (auto& entry : moduleCache_) {
             entry.second.Reset();
         }
@@ -542,6 +546,13 @@ public:
         auto* fnPtr = new NativeFunction(fn);
         v8::Local<v8::External> external = v8::External::New(isolate_, fnPtr);
 
+        // Track per-frame NativeFunction allocations for cleanup
+        // Init-time functions (created before beginFrame) are NOT tracked
+        // and persist for the lifetime of the engine
+        if (inFrame_) {
+            frameNativeFunctions_.push_back(fnPtr);
+        }
+
         // Use Function::New instead of FunctionTemplate::New — lighter weight,
         // avoids SharedFunctionInfo/FeedbackVector accumulation that prevents GC
         v8::Local<v8::Function> func = v8::Function::New(context, nativeCallback, external).ToLocalChecked();
@@ -764,6 +775,11 @@ public:
         isolate_->LowMemoryNotification();
     }
 
+    void beginFrame() override {
+        inFrame_ = true;
+        isolate_->SetIdle(false);
+    }
+
     void clearFrameHandles() override {
         for (auto* handle : frameHandles_) {
             if (g_protectedHandles.find(handle) == g_protectedHandles.end()) {
@@ -772,6 +788,49 @@ public:
             }
         }
         frameHandles_.clear();
+
+        // Free NativeFunction allocations created during this frame
+        for (auto* fn : frameNativeFunctions_) {
+            delete fn;
+        }
+        frameNativeFunctions_.clear();
+
+        inFrame_ = false;
+
+        // Tell V8 we're idle between frames so it can do deferred GC work
+        // (incremental marking, sweeping, weak callback processing).
+        // beginFrame() sets this back to false.
+        isolate_->SetIdle(true);
+    }
+
+    void registerRelease(JSValueHandle obj, std::function<void()> callback) override {
+        v8::Isolate::Scope isolate_scope(isolate_);
+        v8::HandleScope handle_scope(isolate_);
+
+        auto* origPersistent = (v8::Persistent<v8::Value>*)obj.ptr;
+        v8::Local<v8::Value> local = origPersistent->Get(isolate_);
+
+        // Create a separate weak persistent for GC tracking
+        auto* weakData = new WeakRef();
+        weakData->persistent.Reset(isolate_, local);
+        weakData->callback = std::move(callback);
+        weakData->isolate = isolate_;
+
+        // Tell V8 about external (Dawn) memory so it triggers major GC
+        // when native resources accumulate. 16KB is an overestimate per
+        // resource, but it ensures V8's own GC heuristics trigger major
+        // collections frequently enough to fire weak callbacks and release
+        // Dawn resources before they accumulate significantly.
+        static constexpr int64_t kExternalResourceSize = 16384;
+        isolate_->AdjustAmountOfExternalAllocatedMemory(kExternalResourceSize);
+
+        weakData->persistent.SetWeak(weakData, [](const v8::WeakCallbackInfo<WeakRef>& data) {
+            WeakRef* ref = data.GetParameter();
+            ref->callback();  // Release the Dawn resource
+            ref->isolate->AdjustAmountOfExternalAllocatedMemory(-kExternalResourceSize);
+            ref->persistent.Reset();
+            delete ref;
+        }, v8::WeakCallbackType::kParameter);
     }
 
     // ========================================================================
@@ -1075,6 +1134,13 @@ private:
         }
     }
 
+    // Weak reference data for GC-triggered Dawn resource cleanup
+    struct WeakRef {
+        v8::Persistent<v8::Value> persistent;
+        std::function<void()> callback;
+        v8::Isolate* isolate = nullptr;
+    };
+
     v8::Isolate* isolate_ = nullptr;
     v8::ArrayBuffer::Allocator* allocator_ = nullptr;
     v8::Global<v8::Context> context_;
@@ -1084,6 +1150,8 @@ private:
     std::unordered_map<std::string, v8::Global<v8::Module>> moduleCache_;
     std::unordered_map<int, std::string> moduleIdToPath_;  // Reverse lookup: module hash -> path
     std::unordered_set<v8::Persistent<v8::Value>*> frameHandles_;  // Handles to free at end of frame
+    std::vector<NativeFunction*> frameNativeFunctions_;  // NativeFunction allocations to free at end of frame
+    bool inFrame_ = false;  // True during animation frame execution
 };
 
 // Factory function

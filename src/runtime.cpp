@@ -120,6 +120,8 @@ static void installCrashHandlers() {
 namespace webgpu {
     bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void* wgpuQueue, void* wgpuSurface, uint32_t surfaceFormat, uint32_t width, uint32_t height);
     void setOffscreenTexture(void* texture, void* textureView);
+    void beginDawnFrame();
+    void endDawnFrame();
 }
 
 /**
@@ -725,11 +727,16 @@ public:
         // Process microtask queue for promises
         processMicrotasks();
 
+        // Begin frame — enables per-frame allocation tracking
+        jsEngine_->beginFrame();
+        webgpu::beginDawnFrame();
+
         // Execute requestAnimationFrame callbacks (renders a frame)
         executeAnimationFrameCallbacks();
 
-        // Free non-protected handles created during this frame (V8 Persistent leak fix)
+        // Free non-protected handles, per-frame native allocations, and Dawn resources
         jsEngine_->clearFrameHandles();
+        webgpu::endDawnFrame();
 
         // TODO: Translate to Web events via InputShim
         // TODO: Dispatch to JS

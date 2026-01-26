@@ -238,12 +238,27 @@ public:
     virtual void gc() = 0;
 
     /**
+     * Signal the start of a new animation frame.
+     * Enables per-frame allocation tracking (e.g., NativeFunction objects).
+     * Must be called before executeAnimationFrameCallbacks().
+     */
+    virtual void beginFrame() {}
+
+    /**
      * Clear non-protected handles created during the current frame.
      * Called at the end of each animation frame to free intermediate
-     * Persistent handles that are no longer needed (V8-specific concern).
+     * Persistent handles and per-frame native allocations.
      * Default implementation is a no-op for engines that don't need it.
      */
     virtual void clearFrameHandles() {}
+
+    /**
+     * Register a release callback on a JS object wrapper.
+     * When the JS object is garbage collected (no more JS references),
+     * the callback fires to release the associated native resource.
+     * Used for Dawn/WebGPU resource cleanup (texture views, bind groups, etc.).
+     */
+    virtual void registerRelease(JSValueHandle obj, std::function<void()> callback) {}
 
     // ========================================================================
     // Error Handling

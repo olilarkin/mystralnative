@@ -151,6 +151,11 @@ static uint64_t g_nextComputePipelineId = 1;
 static std::unordered_map<uint64_t, WGPURenderPipeline> g_renderPipelineRegistry;
 static uint64_t g_nextRenderPipelineId = 1;
 
+// Dawn resource cleanup is handled via Engine::registerRelease(), which sets up
+// V8 weak callbacks. When the JS wrapper object is garbage collected (no more
+// JS references), the callback fires and releases the Dawn resource.
+// This is the same pattern Chrome uses for WebGPU resource lifecycle.
+
 // Buffer map callback data (global for static callback)
 struct BufferMapData {
     bool completed = false;
@@ -508,11 +513,8 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                             viewDesc.aspect = WGPUTextureAspect_All;
 
                             WGPUTextureView view = wgpuTextureCreateView(g_currentTexture, &viewDesc);
+
                             g_currentTextureView = view;
-                            static int viewCount = 0;
-                            if (viewCount++ < 3) {
-                                std::cout << "[Canvas] Created view: " << view << " format=" << g_surfaceFormat << std::endl;
-                            }
 
                             // Create JS wrapper
                             auto jsView = g_engine->newObject();
@@ -790,6 +792,10 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                             // Submit user command buffers first
                             if (!cmdBuffers.empty() && g_queue) {
                                 wgpuQueueSubmit(g_queue, cmdBuffers.size(), cmdBuffers.data());
+                                // Release command buffers after submission (they're consumed by submit)
+                                for (auto cmdBuf : cmdBuffers) {
+                                    wgpuCommandBufferRelease(cmdBuf);
+                                }
                                 if (g_verboseLogging) std::cout << "[WebGPU] Submitted " << cmdBuffers.size() << " command buffers" << std::endl;
                             } else {
                                 if (g_verboseLogging) std::cout << "[WebGPU] Submit: no buffers (length=" << length << ")" << std::endl;
@@ -2764,6 +2770,7 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                     }
 
                                     WGPUTextureView view = wgpuTextureCreateView(texture, &viewDesc);
+        
                                     if (!view) {
                                         std::cerr << "[WebGPU] createView: Failed to create texture view" << std::endl;
                                         return g_engine->newUndefined();
@@ -2772,6 +2779,9 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                     auto jsView = g_engine->newObject();
                                     g_engine->setPrivateData(jsView, view);
                                     g_engine->setProperty(jsView, "_type", g_engine->newString("textureView"));
+                                    g_engine->registerRelease(jsView, [view]() {
+                                        wgpuTextureViewRelease(view);
+                                    });
 
                                     return jsView;
                                 })
@@ -3014,6 +3024,7 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
 
                             std::vector<WGPUBindGroupEntry> bindGroupEntries;
                             bindGroupEntries.reserve(entryCount);
+                            std::vector<WGPUTextureView> autoCreatedViews;
 
                             for (int i = 0; i < entryCount; i++) {
                                 auto entry = g_engine->getPropertyIndex(entries, i);
@@ -3068,6 +3079,8 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                             WGPUTexture tex = (WGPUTexture)resourcePtr;
                                             WGPUTextureViewDescriptor viewDesc = {};
                                             WGPUTextureView view = wgpuTextureCreateView(tex, &viewDesc);
+                
+                                            autoCreatedViews.push_back(view);
                                             bgEntry.textureView = view;
                                             if (g_verboseLogging) std::cout << "[WebGPU] Auto-created texture view for binding " << bgEntry.binding << std::endl;
                                         } else {
@@ -3089,8 +3102,17 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
 
                             WGPUBindGroup bindGroup = wgpuDeviceCreateBindGroup(g_device, &bgDesc);
 
+                            // Release auto-created texture views — Dawn holds its own
+                            // internal references through the bind group
+                            for (auto v : autoCreatedViews) {
+                                wgpuTextureViewRelease(v);
+                            }
+
                             auto jsBindGroup = g_engine->newObject();
                             g_engine->setPrivateData(jsBindGroup, bindGroup);
+                            g_engine->registerRelease(jsBindGroup, [bindGroup]() {
+                                wgpuBindGroupRelease(bindGroup);
+                            });
 
                             if (g_verboseLogging) std::cout << "[WebGPU] Created bind group with " << entryCount << " entries" << std::endl;
                             return jsBindGroup;
@@ -3241,8 +3263,11 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                             auto jsView = g_engine->newObject();
                             g_engine->setPrivateData(jsView, view);
                             g_engine->setProperty(jsView, "_type", g_engine->newString("textureView"));
+                            g_engine->registerRelease(jsView, [view]() {
+                                wgpuTextureViewRelease(view);
+                            });
 
-                            if (g_verboseLogging) if (g_verboseLogging) std::cout << "[WebGPU] Created texture view" << std::endl;
+                            if (g_verboseLogging) std::cout << "[WebGPU] Created texture view" << std::endl;
                             return jsView;
                         })
                     );
@@ -3872,6 +3897,22 @@ void setOffscreenTexture(void* texture, void* textureView) {
     g_offscreenTexture = (WGPUTexture)texture;
     g_offscreenTextureView = (WGPUTextureView)textureView;
     std::cout << "[WebGPU] Offscreen texture set for headless rendering" << std::endl;
+}
+
+void beginDawnFrame() {
+    // No-op: Dawn resource cleanup is handled by V8 weak callbacks
+    // via Engine::registerRelease() — resources are released when
+    // their JS wrapper objects are garbage collected.
+}
+
+void endDawnFrame() {
+    // Tick Dawn to process completed GPU work and free internal resources
+    // (staging buffers, command encoder state, etc.). Without this, Dawn's
+    // internal objects accumulate unboundedly since completion callbacks
+    // never fire.
+    if (g_device) {
+        wgpuDeviceTick(g_device);
+    }
 }
 
 }  // namespace webgpu
