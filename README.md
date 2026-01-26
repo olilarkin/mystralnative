@@ -1,15 +1,15 @@
 <p align="center">
-  <img src="mystralnative.jpg" alt="MystralNative" width="600" />
+  <img src="mystralnative.jpg" alt="Mystral Native.js" width="600" />
 </p>
 
-# MystralNative
+# Mystral Native.js
 
-**Run JavaScript/TypeScript games natively with WebGPU.** MystralNative is a lightweight runtime that lets you write games using familiar Web APIs (WebGPU, Canvas, Audio, fetch) and run them as native desktop applications on macOS, Windows, and Linux.
+**Run JavaScript/TypeScript games natively with WebGPU.** Mystral Native.js is a lightweight runtime that lets you write games using familiar Web APIs (WebGPU, Canvas, Audio, fetch) and run them as native desktop applications on macOS, Windows, and Linux.
 
 Think of it as "Electron for games" but without Chromium — just your game code, a JS engine, and native WebGPU rendering.
 
 > [!NOTE]
-> MystralNative is in **early alpha**. The core features work — execute JS against WebGPU, Canvas 2D, Web Audio, and fetch — with runtimes available for **macOS**, **Windows**, and **Linux**. Embedding is available for **iOS** and **Android**, with a future goal of console support.
+> Mystral Native.js is in **early alpha**. The core features work — execute JS against WebGPU, Canvas 2D, Web Audio, and fetch — with runtimes available for **macOS**, **Windows**, and **Linux**. Embedding is available for **iOS** and **Android**, with a future goal of console support.
 
 ## Quick Start
 
