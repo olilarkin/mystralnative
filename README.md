@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="mystralnative.jpg" alt="MystralNative" width="600" />
+</p>
+
 # MystralNative
 
 **Run JavaScript/TypeScript games natively with WebGPU.** MystralNative is a lightweight runtime that lets you write games using familiar Web APIs (WebGPU, Canvas, Audio, fetch) and run them as native desktop applications on macOS, Windows, and Linux.
@@ -322,10 +326,6 @@ Prebuilt dependency binaries are managed via [mystralengine/library-builder](htt
 ## Documentation
 
 Full documentation is available at [mystralengine.github.io/mystralnative](https://mystralengine.github.io/mystralnative/).
-
-## Known Issues
-
-**macOS Audio Shutdown**: Process may exit with code 137 when using Web Audio API due to SDL3/CoreAudio interaction. Audio works correctly during runtime; only shutdown is affected.
 
 ## Contributing
 
