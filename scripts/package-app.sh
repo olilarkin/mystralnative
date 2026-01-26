@@ -37,6 +37,7 @@ ENTITLEMENTS=""
 DO_SIGN="true"
 SCRIPT_PATH=""
 RESOURCE_DIRS=()
+BUNDLE_FILE=""
 
 usage() {
     echo "Usage: $0 --binary <path> --name <name> [options]"
@@ -45,7 +46,10 @@ usage() {
     echo "  --binary <path>         Path to MystralNative binary"
     echo "  --name <name>           App display name (e.g. 'Sponza')"
     echo ""
-    echo "Resources Mode (recommended for signed .app):"
+    echo "Bundle File Mode (recommended for signed .app):"
+    echo "  --bundle <file>         .bundle file from 'compile --bundle-only' (cleanest)"
+    echo ""
+    echo "Resources Mode (alternative for signed .app):"
     echo "  --script <path>         Entry point JS file (enables resources mode)"
     echo "  --resources <dir>       Directory to include in Resources (repeatable)"
     echo ""
@@ -69,7 +73,11 @@ usage() {
     echo "  # Compiled binary (no signing):"
     echo "  $0 --binary build/sponza --name Sponza --output dist"
     echo ""
-    echo "  # Resources mode (proper signing):"
+    echo "  # Bundle file mode (cleanest, proper signing):"
+    echo "  $0 --binary build/mystral --name Sponza \\"
+    echo "     --bundle build/sponza.bundle --output dist"
+    echo ""
+    echo "  # Resources mode (proper signing, no compile step):"
     echo "  $0 --binary build/mystral --name Sponza \\"
     echo "     --script examples/sponza.js --resources examples/assets --output dist"
     exit 1
@@ -90,6 +98,7 @@ while [[ $# -gt 0 ]]; do
         --no-sign)      DO_SIGN="false"; shift ;;
         --script)       SCRIPT_PATH="$2"; shift 2 ;;
         --resources)    RESOURCE_DIRS+=("$2"); shift 2 ;;
+        --bundle)       BUNDLE_FILE="$2"; shift 2 ;;
         --help|-h)      usage ;;
         *)              echo "Unknown option: $1"; usage ;;
     esac
@@ -107,8 +116,15 @@ if [ ! -f "$BINARY_PATH" ]; then
 fi
 
 # Determine mode
+BUNDLE_MODE="false"
 RESOURCES_MODE="false"
-if [ -n "$SCRIPT_PATH" ]; then
+if [ -n "$BUNDLE_FILE" ]; then
+    BUNDLE_MODE="true"
+    if [ ! -f "$BUNDLE_FILE" ]; then
+        echo "Error: Bundle file not found: $BUNDLE_FILE"
+        exit 1
+    fi
+elif [ -n "$SCRIPT_PATH" ]; then
     RESOURCES_MODE="true"
     if [ ! -f "$SCRIPT_PATH" ]; then
         echo "Error: Script not found: $SCRIPT_PATH"
@@ -172,7 +188,21 @@ rm -rf "$APP_DIR"
 mkdir -p "${APP_DIR}/Contents/MacOS"
 mkdir -p "${APP_DIR}/Contents/Resources"
 
-if [ "$RESOURCES_MODE" = "true" ]; then
+if [ "$BUNDLE_MODE" = "true" ]; then
+    echo "Creating ${APP_NAME}.app (bundle file mode)..."
+
+    # Copy the mystral runtime binary as the app executable
+    # The runtime auto-detects ../Resources/game.bundle on macOS
+    cp "$BINARY_PATH" "${APP_DIR}/Contents/MacOS/${APP_NAME_LOWER}"
+    chmod +x "${APP_DIR}/Contents/MacOS/${APP_NAME_LOWER}"
+    echo "  Binary: ${APP_NAME_LOWER} ($(du -sh "${APP_DIR}/Contents/MacOS/${APP_NAME_LOWER}" | awk '{print $1}'))"
+
+    # Copy bundle file to Resources/game.bundle
+    cp "$BUNDLE_FILE" "${APP_DIR}/Contents/Resources/game.bundle"
+    BUNDLE_SIZE=$(du -sh "$BUNDLE_FILE" | awk '{print $1}')
+    echo "  Bundle: game.bundle (${BUNDLE_SIZE})"
+
+elif [ "$RESOURCES_MODE" = "true" ]; then
     echo "Creating ${APP_NAME}.app (resources mode)..."
 
     # Copy the mystral runtime binary
@@ -274,7 +304,6 @@ if [ -n "$ICON_PATH" ] && [ -f "$ICON_PATH" ]; then
 fi
 
 # Check for dynamic library dependencies that need bundling
-# In resources mode, check the mystral binary; in compiled mode, check the app binary
 if [ "$RESOURCES_MODE" = "true" ]; then
     CHECK_BINARY="${APP_DIR}/Contents/MacOS/mystral"
 else
@@ -307,11 +336,17 @@ fi
 if [ "$DO_SIGN" = "true" ]; then
     IDENTITY=$(resolve_signing_identity)
 
-    if [ "$RESOURCES_MODE" = "true" ]; then
-        # Resources mode: clean Mach-O binary, proper signing works
+    if [ "$RESOURCES_MODE" = "true" ] || [ "$BUNDLE_MODE" = "true" ]; then
+        # Resources/bundle mode: clean Mach-O binary, proper signing works
+        if [ "$RESOURCES_MODE" = "true" ]; then
+            SIGN_BINARY="${APP_DIR}/Contents/MacOS/mystral"
+        else
+            SIGN_BINARY="${APP_DIR}/Contents/MacOS/${APP_NAME_LOWER}"
+        fi
+
         if [ "$IDENTITY" = "-" ]; then
             echo "  Signing: ad-hoc"
-            codesign --force --sign - "${APP_DIR}/Contents/MacOS/mystral"
+            codesign --force --sign - "$SIGN_BINARY"
             codesign --force --sign - "$APP_DIR"
             echo "  Ad-hoc signature applied"
         else
@@ -323,7 +358,7 @@ if [ "$DO_SIGN" = "true" ]; then
                 echo "  Entitlements: ${ENTITLEMENTS}"
             fi
 
-            codesign "${SIGN_ARGS[@]}" "${APP_DIR}/Contents/MacOS/mystral"
+            codesign "${SIGN_ARGS[@]}" "$SIGN_BINARY"
             codesign "${SIGN_ARGS[@]}" "$APP_DIR"
             echo "  Developer ID signature applied"
         fi

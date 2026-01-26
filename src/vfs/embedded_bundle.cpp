@@ -1,9 +1,11 @@
 #include "mystral/vfs/embedded_bundle.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -66,11 +68,60 @@ bool readU64(const std::vector<uint8_t>& data, size_t& cursor, uint64_t& out) {
     return true;
 }
 
+std::unique_ptr<EmbeddedBundle> findExternalBundle() {
+    // Check environment variable override
+    const char* envBundle = std::getenv("MYSTRAL_BUNDLE");
+    if (envBundle && envBundle[0] != '\0') {
+        auto bundle = EmbeddedBundle::loadFromPath(envBundle);
+        if (bundle) {
+            std::cout << "[VFS] Loaded bundle from MYSTRAL_BUNDLE: " << envBundle << std::endl;
+            return bundle;
+        }
+    }
+
+    // Get executable directory
+    std::string exePath = getExecutablePath();
+    if (exePath.empty()) {
+        return nullptr;
+    }
+    std::filesystem::path exeDir = std::filesystem::path(exePath).parent_path();
+
+    // Search next to executable: game.bundle
+    std::filesystem::path localBundle = exeDir / "game.bundle";
+    if (std::filesystem::exists(localBundle)) {
+        auto bundle = EmbeddedBundle::loadFromPath(localBundle.string());
+        if (bundle) {
+            std::cout << "[VFS] Loaded bundle: " << localBundle << std::endl;
+            return bundle;
+        }
+    }
+
+#ifdef __APPLE__
+    // macOS: check ../Resources/game.bundle (for .app bundles)
+    std::filesystem::path resourcesBundle = exeDir / ".." / "Resources" / "game.bundle";
+    resourcesBundle = resourcesBundle.lexically_normal();
+    if (std::filesystem::exists(resourcesBundle)) {
+        auto bundle = EmbeddedBundle::loadFromPath(resourcesBundle.string());
+        if (bundle) {
+            std::cout << "[VFS] Loaded bundle from .app Resources: " << resourcesBundle << std::endl;
+            return bundle;
+        }
+    }
+#endif
+
+    return nullptr;
+}
+
 EmbeddedBundle* sharedBundle() {
     static std::unique_ptr<EmbeddedBundle> bundle;
     static bool loaded = false;
     if (!loaded) {
+        // Try appended data first (compiled binary)
         bundle = EmbeddedBundle::loadFromExecutable();
+        // Fall back to external bundle file
+        if (!bundle) {
+            bundle = findExternalBundle();
+        }
         loaded = true;
     }
     return bundle.get();

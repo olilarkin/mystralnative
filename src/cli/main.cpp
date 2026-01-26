@@ -71,6 +71,7 @@ COMPILE OPTIONS:
     --output <file>       Output binary path (default: ./<entry-stem>)
     --out, -o <file>      Alias for --output
     --root <dir>          Root directory for bundle paths (default: cwd)
+    --bundle-only         Create standalone .bundle file (no exe, for .app packaging)
 
 HEADLESS MODE:
     Run without displaying a window (useful for servers, CI, etc.):
@@ -101,10 +102,12 @@ EXAMPLES:
     mystral run test.js --headless --screenshot out.png       # Headless + screenshot
     MYSTRAL_HEADLESS=1 mystral run render.js --screenshot render.png --frames 10
     mystral compile game.js --include assets --out my-game    # Bundle into a single binary
+    mystral compile game.js --include assets --out game.bundle --bundle-only  # Standalone bundle file
 
 ENVIRONMENT:
-    MYSTRAL_HEADLESS=1  Run in headless mode (hidden window)
-    MYSTRAL_DEBUG=1     Enable verbose debug logging
+    MYSTRAL_HEADLESS=1        Run in headless mode (hidden window)
+    MYSTRAL_DEBUG=1           Enable verbose debug logging
+    MYSTRAL_BUNDLE=<path>     Load external bundle file (overrides auto-detection)
 
 )" << std::endl;
 }
@@ -140,6 +143,7 @@ struct CLIOptions {
     std::vector<std::string> assetDirs;
     std::string outputPath;
     std::string rootDir;
+    bool bundleOnly = false;  // Create standalone .bundle file (no exe copy)
 };
 
 CLIOptions parseArgs(int argc, char* argv[]) {
@@ -178,6 +182,8 @@ CLIOptions parseArgs(int argc, char* argv[]) {
             opts.noSdl = true;
         } else if (arg == "--watch" || arg == "-w") {
             opts.watch = true;
+        } else if (arg == "--bundle-only") {
+            opts.bundleOnly = true;
         } else if ((arg == "run") && opts.command.empty()) {
             opts.command = "run";
         } else if ((arg == "compile" || arg == "--compile") && opts.command.empty()) {
@@ -510,11 +516,19 @@ static int compileBundle(const CLIOptions& opts) {
     if (outputPath.is_relative()) {
         outputPath = fs::absolute(outputPath);
     }
+
+    if (opts.bundleOnly) {
+        // Bundle-only mode: add .bundle extension if no extension specified
+        if (outputPath.extension().empty()) {
+            outputPath += ".bundle";
+        }
+    } else {
 #ifdef _WIN32
-    if (outputPath.extension() != ".exe") {
-        outputPath += ".exe";
-    }
+        if (outputPath.extension() != ".exe") {
+            outputPath += ".exe";
+        }
 #endif
+    }
 
     std::error_code ec;
     fs::path outputDir = outputPath.parent_path();
@@ -526,31 +540,35 @@ static int compileBundle(const CLIOptions& opts) {
         }
     }
 
-    std::string exePath = mystral::vfs::getExecutablePath();
-    if (exePath.empty()) {
-        std::cerr << "Error: Could not resolve current executable path." << std::endl;
-        return 1;
-    }
-
-    if (fs::exists(outputPath, ec) && fs::equivalent(outputPath, exePath, ec)) {
-        std::cerr << "Error: Output path must be different from the current executable." << std::endl;
-        return 1;
-    }
-
-    std::ifstream in(exePath, std::ios::binary);
-    if (!in.is_open()) {
-        std::cerr << "Error: Failed to open runtime binary: " << exePath << std::endl;
-        return 1;
-    }
     std::ofstream out(outputPath, std::ios::binary | std::ios::trunc);
     if (!out.is_open()) {
-        std::cerr << "Error: Failed to create output binary: " << outputPath << std::endl;
+        std::cerr << "Error: Failed to create output file: " << outputPath << std::endl;
         return 1;
     }
 
-    if (!copyStream(in, out)) {
-        std::cerr << "Error: Failed to copy runtime binary." << std::endl;
-        return 1;
+    if (!opts.bundleOnly) {
+        // Copy the runtime executable as the base of the compiled binary
+        std::string exePath = mystral::vfs::getExecutablePath();
+        if (exePath.empty()) {
+            std::cerr << "Error: Could not resolve current executable path." << std::endl;
+            return 1;
+        }
+
+        if (fs::exists(outputPath, ec) && fs::equivalent(outputPath, exePath, ec)) {
+            std::cerr << "Error: Output path must be different from the current executable." << std::endl;
+            return 1;
+        }
+
+        std::ifstream in(exePath, std::ios::binary);
+        if (!in.is_open()) {
+            std::cerr << "Error: Failed to open runtime binary: " << exePath << std::endl;
+            return 1;
+        }
+
+        if (!copyStream(in, out)) {
+            std::cerr << "Error: Failed to copy runtime binary." << std::endl;
+            return 1;
+        }
     }
 
     uint64_t bundleStart = static_cast<uint64_t>(out.tellp());
@@ -598,23 +616,30 @@ static int compileBundle(const CLIOptions& opts) {
         return 1;
     }
 
-    auto perms = fs::status(exePath, ec).permissions();
-    if (!ec) {
-        fs::permissions(outputPath, perms, ec);
-    }
+    if (!opts.bundleOnly) {
+        // Copy executable permissions (only for compiled binaries, not standalone bundles)
+        std::string exePath = mystral::vfs::getExecutablePath();
+        auto perms = fs::status(exePath, ec).permissions();
+        if (!ec) {
+            fs::permissions(outputPath, perms, ec);
+        }
 #ifndef _WIN32
-    if (!ec) {
-        fs::permissions(outputPath,
-                        perms | fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec,
-                        ec);
-    }
+        if (!ec) {
+            fs::permissions(outputPath,
+                            perms | fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec,
+                            ec);
+        }
 #endif
+    }
 
     if (!opts.quiet) {
         std::cout << "Bundle complete!" << std::endl;
         std::cout << "Entry: " << entryBundlePath << std::endl;
         std::cout << "Files bundled: " << files.size() << std::endl;
         std::cout << "Output: " << outputPath << std::endl;
+        if (opts.bundleOnly) {
+            std::cout << "Mode: standalone bundle (place as game.bundle next to mystral binary)" << std::endl;
+        }
     }
 
     return 0;
