@@ -66,6 +66,12 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Set version from tag
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "Setting version to $VERSION"
+          node scripts/set-version.mjs "$VERSION"
+
       - name: Cache dependencies
         uses: actions/cache@v4
         id: cache-deps
@@ -171,6 +177,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Set version from tag
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "Setting version to $VERSION"
+          node scripts/set-version.mjs "$VERSION"
 
       - name: Install system dependencies
         run: |
@@ -289,6 +301,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Set version from tag
+        shell: bash
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "Setting version to $VERSION"
+          node scripts/set-version.mjs "$VERSION"
 
       - name: Cache dependencies
         uses: actions/cache@v4

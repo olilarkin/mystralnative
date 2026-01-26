@@ -18,9 +18,48 @@ permissions:
 
 jobs:
   # =============================================================================
+  # Prepare — compute next version before builds start
+  # =============================================================================
+  prepare:
+    name: Compute Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.next_version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute next version
+        id: next_version
+        run: |
+          CURRENT=$(jq -r '.version' package.json)
+          BUMP="${{ inputs.version_bump }}"
+
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+
+          case "$BUMP" in
+            major)
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            minor)
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            patch)
+              PATCH=$((PATCH + 1))
+              ;;
+          esac
+          NEXT="${MAJOR}.${MINOR}.${PATCH}"
+
+          echo "version=$NEXT" >> $GITHUB_OUTPUT
+          echo "Current: $CURRENT -> Next: $NEXT ($BUMP bump)"
+
+  # =============================================================================
   # macOS Builds
   # =============================================================================
   build-macos:
+    needs: [prepare]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
@@ -72,6 +111,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Set version
+        run: |
+          echo "Setting version to ${{ needs.prepare.outputs.version }}"
+          node scripts/set-version.mjs "${{ needs.prepare.outputs.version }}"
 
       - name: Cache dependencies
         uses: actions/cache@v4
@@ -149,6 +193,7 @@ jobs:
   # Linux Builds
   # =============================================================================
   build-linux:
+    needs: [prepare]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
@@ -177,6 +222,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Set version
+        run: |
+          echo "Setting version to ${{ needs.prepare.outputs.version }}"
+          node scripts/set-version.mjs "${{ needs.prepare.outputs.version }}"
 
       - name: Install system dependencies
         run: |
@@ -244,6 +294,7 @@ jobs:
           cp examples/triangle.js artifacts/examples/
           cp examples/simple-cube.js artifacts/examples/
           cp examples/test-audio.js artifacts/examples/
+          cp examples/test-audio.js artifacts/examples/
           cp examples/test-gamepad.js artifacts/examples/
           cp examples/mystral-helmet.js artifacts/examples/ || true
           cp examples/assets/DamagedHelmet.glb artifacts/examples/assets/ || true
@@ -260,6 +311,7 @@ jobs:
   # Windows Builds - wgpu
   # =============================================================================
   build-windows-wgpu:
+    needs: [prepare]
     runs-on: windows-2022
     timeout-minutes: 15
     strategy:
@@ -280,6 +332,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Set version
+        shell: bash
+        run: |
+          echo "Setting version to ${{ needs.prepare.outputs.version }}"
+          node scripts/set-version.mjs "${{ needs.prepare.outputs.version }}"
 
       - name: Cache dependencies
         uses: actions/cache@v4
@@ -358,6 +416,7 @@ jobs:
   # Windows Builds - Dawn
   # =============================================================================
   build-windows-dawn:
+    needs: [prepare]
     runs-on: windows-2022
     timeout-minutes: 15
     strategy:
@@ -378,6 +437,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Set version
+        shell: bash
+        run: |
+          echo "Setting version to ${{ needs.prepare.outputs.version }}"
+          node scripts/set-version.mjs "${{ needs.prepare.outputs.version }}"
 
       - name: Cache dependencies
         uses: actions/cache@v4
@@ -489,7 +554,7 @@ jobs:
   create-release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [build-macos, build-linux, build-windows-wgpu, build-windows-dawn]
+    needs: [prepare, build-macos, build-linux, build-windows-wgpu, build-windows-dawn]
     if: success()
 
     steps:
@@ -498,66 +563,26 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get current version from package.json
-        id: current_version
-        run: |
-          VERSION=$(jq -r '.version' package.json)
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Current version: $VERSION"
-
-      - name: Get next version
-        id: next_version
-        run: |
-          CURRENT="${{ steps.current_version.outputs.version }}"
-          BUMP="${{ inputs.version_bump }}"
-
-          # Parse version components
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-
-          # Check if this is the initial release (0.0.1)
-          if [ "$CURRENT" == "0.0.1" ]; then
-            # First release - use 0.0.1 as is
-            NEXT="0.0.1"
-          else
-            # Increment based on bump type
-            case "$BUMP" in
-              major)
-                MAJOR=$((MAJOR + 1))
-                MINOR=0
-                PATCH=0
-                ;;
-              minor)
-                MINOR=$((MINOR + 1))
-                PATCH=0
-                ;;
-              patch)
-                PATCH=$((PATCH + 1))
-                ;;
-            esac
-            NEXT="${MAJOR}.${MINOR}.${PATCH}"
-          fi
-
-          echo "next=$NEXT" >> $GITHUB_OUTPUT
-          echo "Next version: $NEXT"
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
       - name: Configure Git
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Update version in package.json (if not initial release)
-        if: steps.current_version.outputs.version != '0.0.1' || steps.next_version.outputs.next == '0.0.1'
+      - name: Update version in source files
         run: |
-          NEXT="${{ steps.next_version.outputs.next }}"
-          CURRENT="${{ steps.current_version.outputs.version }}"
-
-          # Only update if version changed
-          if [ "$NEXT" != "$CURRENT" ]; then
-            jq --arg v "$NEXT" '.version = $v' package.json > temp.json && mv temp.json package.json
-            git add package.json
+          NEXT="${{ needs.prepare.outputs.version }}"
+          echo "Updating all version references to $NEXT"
+          node scripts/set-version.mjs "$NEXT"
+          git add package.json CMakeLists.txt include/mystral/runtime.h
+          git diff --cached --quiet || {
             git commit -m "Bump version to $NEXT"
             git push origin main
-          fi
+          }
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -579,8 +604,8 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.next_version.outputs.next }}
-          name: MystralNative v${{ steps.next_version.outputs.next }}
+          tag_name: v${{ needs.prepare.outputs.version }}
+          name: MystralNative v${{ needs.prepare.outputs.version }}
           draft: false
           prerelease: false
           generate_release_notes: true
@@ -588,12 +613,3 @@ jobs:
             release-assets/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Update package.json for next development cycle
-        if: steps.current_version.outputs.version == '0.0.1'
-        run: |
-          # After initial 0.0.1 release, bump to 0.0.2 for next release
-          jq '.version = "0.0.2"' package.json > temp.json && mv temp.json package.json
-          git add package.json
-          git commit -m "Prepare for next development iteration (0.0.2)"
-          git push origin main
