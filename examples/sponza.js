@@ -14225,6 +14225,2252 @@ class TilemapLayer extends Node {
   }
 }
 
+// ../../src/core/animation/Bone.ts
+class Bone {
+  name;
+  index;
+  parent = null;
+  children = [];
+  bindPosition;
+  bindRotation;
+  bindScale;
+  inverseBindMatrix;
+  _position;
+  _rotation;
+  _scale;
+  _localMatrix = new Matrix4;
+  _worldMatrix = new Matrix4;
+  _finalMatrix = new Matrix4;
+  _localMatrixDirty = true;
+  _worldMatrixDirty = true;
+  constructor(data) {
+    this.name = data.name;
+    this.index = data.index;
+    this.bindPosition = data.localBindPose.position.clone();
+    this.bindRotation = data.localBindPose.rotation.clone();
+    this.bindScale = data.localBindPose.scale.clone();
+    this.inverseBindMatrix = data.inverseBindMatrix.clone();
+    this._position = this.bindPosition.clone();
+    this._rotation = this.bindRotation.clone();
+    this._scale = this.bindScale.clone();
+  }
+  get position() {
+    return this._position;
+  }
+  set position(value) {
+    this._position.copy(value);
+    this._markLocalDirty();
+  }
+  get rotation() {
+    return this._rotation;
+  }
+  set rotation(value) {
+    this._rotation.copy(value);
+    this._markLocalDirty();
+  }
+  get scale() {
+    return this._scale;
+  }
+  set scale(value) {
+    this._scale.copy(value);
+    this._markLocalDirty();
+  }
+  get localMatrix() {
+    if (this._localMatrixDirty) {
+      this.updateLocalMatrix();
+    }
+    return this._localMatrix;
+  }
+  get worldMatrix() {
+    if (this._worldMatrixDirty) {
+      this.updateWorldMatrix();
+    }
+    return this._worldMatrix;
+  }
+  get finalMatrix() {
+    if (this._worldMatrixDirty) {
+      this.updateWorldMatrix();
+    }
+    return this._finalMatrix;
+  }
+  updateLocalMatrix() {
+    this._localMatrix.compose(this._position, this._rotation.toMatrix4(), this._scale);
+    this._localMatrixDirty = false;
+  }
+  updateWorldMatrix() {
+    if (this._localMatrixDirty) {
+      this.updateLocalMatrix();
+    }
+    if (this.parent) {
+      this._worldMatrix.multiplyMatrices(this.parent.worldMatrix, this._localMatrix);
+    } else {
+      this._worldMatrix.copy(this._localMatrix);
+    }
+    this._finalMatrix.multiplyMatrices(this._worldMatrix, this.inverseBindMatrix);
+    this._worldMatrixDirty = false;
+  }
+  copyBindPose() {
+    this._position.copy(this.bindPosition);
+    this._rotation.copy(this.bindRotation);
+    this._scale.copy(this.bindScale);
+    this._markLocalDirty();
+  }
+  setPosition(x, y, z) {
+    this._position.set(x, y, z);
+    this._markLocalDirty();
+  }
+  setRotation(x, y, z, w) {
+    this._rotation.x = x;
+    this._rotation.y = y;
+    this._rotation.z = z;
+    this._rotation.w = w;
+    this._markLocalDirty();
+  }
+  setScale(x, y, z) {
+    this._scale.set(x, y, z);
+    this._markLocalDirty();
+  }
+  addChild(bone) {
+    if (bone.parent) {
+      bone.parent.removeChild(bone);
+    }
+    bone.parent = this;
+    this.children.push(bone);
+    bone._markWorldDirty();
+  }
+  removeChild(bone) {
+    const index = this.children.indexOf(bone);
+    if (index !== -1) {
+      this.children.splice(index, 1);
+      bone.parent = null;
+    }
+  }
+  _markLocalDirty() {
+    this._localMatrixDirty = true;
+    this._markWorldDirty();
+  }
+  _markWorldDirty() {
+    this._worldMatrixDirty = true;
+    for (const child of this.children) {
+      child._markWorldDirty();
+    }
+  }
+  clone() {
+    const cloned = new Bone({
+      name: this.name,
+      index: this.index,
+      parentIndex: this.parent?.index ?? -1,
+      localBindPose: {
+        position: this.bindPosition.clone(),
+        rotation: this.bindRotation.clone(),
+        scale: this.bindScale.clone()
+      },
+      inverseBindMatrix: this.inverseBindMatrix.clone()
+    });
+    cloned._position.copy(this._position);
+    cloned._rotation.copy(this._rotation);
+    cloned._scale.copy(this._scale);
+    return cloned;
+  }
+  toString() {
+    return `Bone(${this.name}, index=${this.index}, parent=${this.parent?.name ?? "none"})`;
+  }
+}
+// ../../src/core/animation/Skeleton.ts
+var MAX_BONES = 128;
+
+class Skeleton {
+  bones = [];
+  bonesByName = new Map;
+  rootBones = [];
+  boneMatricesBuffer = null;
+  bindGroup = null;
+  _boneMatrices;
+  _gpuDirty = true;
+  _device = null;
+  constructor(bonesData) {
+    this._boneMatrices = new Float32Array(MAX_BONES * 16);
+    for (const data of bonesData) {
+      const bone = new Bone(data);
+      this.bones[bone.index] = bone;
+      this.bonesByName.set(bone.name, bone);
+    }
+    for (const data of bonesData) {
+      const bone = this.bones[data.index];
+      if (data.parentIndex >= 0 && data.parentIndex < this.bones.length) {
+        const parent = this.bones[data.parentIndex];
+        if (parent) {
+          parent.addChild(bone);
+        }
+      } else {
+        this.rootBones.push(bone);
+      }
+    }
+  }
+  getBone(name) {
+    return this.bonesByName.get(name) ?? null;
+  }
+  getBoneIndex(name) {
+    const bone = this.bonesByName.get(name);
+    return bone?.index ?? -1;
+  }
+  get boneCount() {
+    return this.bones.length;
+  }
+  update() {
+    for (const root of this.rootBones) {
+      this._updateBoneRecursive(root);
+    }
+    this._gpuDirty = true;
+  }
+  _updateBoneRecursive(bone) {
+    bone.updateWorldMatrix();
+    for (const child of bone.children) {
+      this._updateBoneRecursive(child);
+    }
+  }
+  initGPU(device) {
+    if (this._device === device && this.boneMatricesBuffer) {
+      return;
+    }
+    this._device = device;
+    this.boneMatricesBuffer = device.createBuffer({
+      label: `Skeleton Bone Matrices (${this.boneCount} bones)`,
+      size: MAX_BONES * 16 * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    });
+    this.uploadToGPU(device);
+  }
+  static createBindGroupLayout(device) {
+    return device.createBindGroupLayout({
+      label: "Skeleton Bind Group Layout",
+      entries: [
+        {
+          binding: 0,
+          visibility: GPUShaderStage.VERTEX,
+          buffer: {
+            type: "read-only-storage"
+          }
+        }
+      ]
+    });
+  }
+  createBindGroup(device, layout) {
+    if (!this.boneMatricesBuffer) {
+      this.initGPU(device);
+    }
+    this.bindGroup = device.createBindGroup({
+      label: "Skeleton Bind Group",
+      layout,
+      entries: [
+        {
+          binding: 0,
+          resource: { buffer: this.boneMatricesBuffer }
+        }
+      ]
+    });
+    return this.bindGroup;
+  }
+  uploadToGPU(device) {
+    if (!this._gpuDirty)
+      return;
+    if (!this.boneMatricesBuffer) {
+      this.initGPU(device);
+    }
+    for (let i = 0;i < this.bones.length; i++) {
+      const bone = this.bones[i];
+      if (bone) {
+        const matrix = bone.finalMatrix;
+        const offset = i * 16;
+        this._boneMatrices.set(matrix.elements, offset);
+      }
+    }
+    const identityElements = Matrix4.identity.elements;
+    for (let i = this.bones.length;i < MAX_BONES; i++) {
+      const offset = i * 16;
+      this._boneMatrices.set(identityElements, offset);
+    }
+    device.queue.writeBuffer(this.boneMatricesBuffer, 0, this._boneMatrices.buffer, this._boneMatrices.byteOffset, this._boneMatrices.byteLength);
+    this._gpuDirty = false;
+  }
+  getBoneMatrices() {
+    return this._boneMatrices;
+  }
+  copyBindPose() {
+    for (const bone of this.bones) {
+      if (bone) {
+        bone.copyBindPose();
+      }
+    }
+    this._gpuDirty = true;
+  }
+  clone() {
+    const bonesData = this.bones.map((bone) => ({
+      name: bone.name,
+      index: bone.index,
+      parentIndex: bone.parent?.index ?? -1,
+      localBindPose: {
+        position: bone.bindPosition.clone(),
+        rotation: bone.bindRotation.clone(),
+        scale: bone.bindScale.clone()
+      },
+      inverseBindMatrix: bone.inverseBindMatrix.clone()
+    }));
+    const cloned = new Skeleton(bonesData);
+    for (let i = 0;i < this.bones.length; i++) {
+      const srcBone = this.bones[i];
+      const dstBone = cloned.bones[i];
+      if (srcBone && dstBone) {
+        dstBone.position.copy(srcBone.position);
+        dstBone.rotation.copy(srcBone.rotation);
+        dstBone.scale.copy(srcBone.scale);
+      }
+    }
+    return cloned;
+  }
+  traverse(callback) {
+    const traverseRecursive = (bone) => {
+      callback(bone);
+      for (const child of bone.children) {
+        traverseRecursive(child);
+      }
+    };
+    for (const root of this.rootBones) {
+      traverseRecursive(root);
+    }
+  }
+  destroy() {
+    this.boneMatricesBuffer?.destroy();
+    this.boneMatricesBuffer = null;
+    this.bindGroup = null;
+    this._device = null;
+  }
+  toString() {
+    return `Skeleton(${this.boneCount} bones, ${this.rootBones.length} roots)`;
+  }
+}
+// ../../src/core/animation/AnimationTrack.ts
+class AnimationTrack {
+  targetBoneIndex;
+  property;
+  interpolation;
+  keyframes;
+  duration;
+  constructor(targetBoneIndex, property, interpolation, times, values) {
+    this.targetBoneIndex = targetBoneIndex;
+    this.property = property;
+    this.interpolation = interpolation;
+    this.keyframes = [];
+    const componentCount = property === "rotation" ? 4 : 3;
+    const keyframeCount = times.length;
+    const stride = interpolation === "CUBICSPLINE" ? componentCount * 3 : componentCount;
+    for (let i = 0;i < keyframeCount; i++) {
+      const time = times[i];
+      const valueOffset = i * stride;
+      let value;
+      let inTangent;
+      let outTangent;
+      if (interpolation === "CUBICSPLINE") {
+        const inOffset = valueOffset;
+        const valOffset = valueOffset + componentCount;
+        const outOffset = valueOffset + componentCount * 2;
+        if (property === "rotation") {
+          inTangent = new Quaternion(values[inOffset], values[inOffset + 1], values[inOffset + 2], values[inOffset + 3]);
+          value = new Quaternion(values[valOffset], values[valOffset + 1], values[valOffset + 2], values[valOffset + 3]);
+          outTangent = new Quaternion(values[outOffset], values[outOffset + 1], values[outOffset + 2], values[outOffset + 3]);
+        } else {
+          inTangent = new Vector3(values[inOffset], values[inOffset + 1], values[inOffset + 2]);
+          value = new Vector3(values[valOffset], values[valOffset + 1], values[valOffset + 2]);
+          outTangent = new Vector3(values[outOffset], values[outOffset + 1], values[outOffset + 2]);
+        }
+      } else {
+        if (property === "rotation") {
+          value = new Quaternion(values[valueOffset], values[valueOffset + 1], values[valueOffset + 2], values[valueOffset + 3]);
+        } else {
+          value = new Vector3(values[valueOffset], values[valueOffset + 1], values[valueOffset + 2]);
+        }
+      }
+      this.keyframes.push({ time, value, inTangent, outTangent });
+    }
+    this.duration = keyframeCount > 0 ? this.keyframes[keyframeCount - 1].time : 0;
+  }
+  sample(time) {
+    if (this.keyframes.length === 0) {
+      return this.property === "rotation" ? Quaternion.identity : this.property === "scale" ? Vector3.one : Vector3.zero;
+    }
+    if (this.keyframes.length === 1) {
+      return this.cloneValue(this.keyframes[0].value);
+    }
+    const firstKeyframe = this.keyframes[0];
+    const lastKeyframe = this.keyframes[this.keyframes.length - 1];
+    if (time <= firstKeyframe.time) {
+      return this.cloneValue(firstKeyframe.value);
+    }
+    if (time >= lastKeyframe.time) {
+      return this.cloneValue(lastKeyframe.value);
+    }
+    let prevKeyframe = firstKeyframe;
+    let nextKeyframe = this.keyframes[1];
+    for (let i = 1;i < this.keyframes.length; i++) {
+      nextKeyframe = this.keyframes[i];
+      if (nextKeyframe.time >= time) {
+        prevKeyframe = this.keyframes[i - 1];
+        break;
+      }
+    }
+    const duration = nextKeyframe.time - prevKeyframe.time;
+    const t = duration > 0 ? (time - prevKeyframe.time) / duration : 0;
+    switch (this.interpolation) {
+      case "STEP":
+        return this.cloneValue(prevKeyframe.value);
+      case "CUBICSPLINE":
+        return this.cubicSplineInterpolate(prevKeyframe, nextKeyframe, t, duration);
+      case "LINEAR":
+      default:
+        return this.linearInterpolate(prevKeyframe.value, nextKeyframe.value, t);
+    }
+  }
+  linearInterpolate(a, b, t) {
+    if (this.property === "rotation") {
+      return a.clone().slerp(b, t);
+    } else {
+      const va = a;
+      const vb = b;
+      return new Vector3(va.x + (vb.x - va.x) * t, va.y + (vb.y - va.y) * t, va.z + (vb.z - va.z) * t);
+    }
+  }
+  cubicSplineInterpolate(prev, next, t, duration) {
+    const t2 = t * t;
+    const t3 = t2 * t;
+    const h00 = 2 * t3 - 3 * t2 + 1;
+    const h10 = t3 - 2 * t2 + t;
+    const h01 = -2 * t3 + 3 * t2;
+    const h11 = t3 - t2;
+    if (this.property === "rotation") {
+      const p0 = prev.value;
+      const m0 = prev.outTangent;
+      const p1 = next.value;
+      const m1 = next.inTangent;
+      const scaledM0 = new Quaternion(m0.x * duration, m0.y * duration, m0.z * duration, m0.w * duration);
+      const scaledM1 = new Quaternion(m1.x * duration, m1.y * duration, m1.z * duration, m1.w * duration);
+      const result = new Quaternion(h00 * p0.x + h10 * scaledM0.x + h01 * p1.x + h11 * scaledM1.x, h00 * p0.y + h10 * scaledM0.y + h01 * p1.y + h11 * scaledM1.y, h00 * p0.z + h10 * scaledM0.z + h01 * p1.z + h11 * scaledM1.z, h00 * p0.w + h10 * scaledM0.w + h01 * p1.w + h11 * scaledM1.w);
+      return result.normalize();
+    } else {
+      const p0 = prev.value;
+      const m0 = prev.outTangent;
+      const p1 = next.value;
+      const m1 = next.inTangent;
+      const scaledM0 = m0.multiply(duration);
+      const scaledM1 = m1.multiply(duration);
+      return new Vector3(h00 * p0.x + h10 * scaledM0.x + h01 * p1.x + h11 * scaledM1.x, h00 * p0.y + h10 * scaledM0.y + h01 * p1.y + h11 * scaledM1.y, h00 * p0.z + h10 * scaledM0.z + h01 * p1.z + h11 * scaledM1.z);
+    }
+  }
+  cloneValue(value) {
+    if (value instanceof Quaternion) {
+      return value.clone();
+    }
+    return value.clone();
+  }
+  getStartValue() {
+    return this.keyframes.length > 0 ? this.keyframes[0].value : null;
+  }
+  getEndValue() {
+    return this.keyframes.length > 0 ? this.keyframes[this.keyframes.length - 1].value : null;
+  }
+  toString() {
+    return `AnimationTrack(bone=${this.targetBoneIndex}, property=${this.property}, ` + `keyframes=${this.keyframes.length}, duration=${this.duration.toFixed(2)}s)`;
+  }
+}
+// ../../src/core/animation/NodeAnimationTrack.ts
+class NodeAnimationTrack {
+  targetNode;
+  property;
+  interpolation;
+  keyframes;
+  duration;
+  constructor(targetNode, property, interpolation, times, values) {
+    this.targetNode = targetNode;
+    this.property = property;
+    this.interpolation = interpolation;
+    this.keyframes = [];
+    const componentCount = property === "rotation" ? 4 : 3;
+    const keyframeCount = times.length;
+    const stride = interpolation === "CUBICSPLINE" ? componentCount * 3 : componentCount;
+    for (let i = 0;i < keyframeCount; i++) {
+      const time = times[i];
+      const valueOffset = i * stride;
+      let value;
+      let inTangent;
+      let outTangent;
+      if (interpolation === "CUBICSPLINE") {
+        const inOffset = valueOffset;
+        const valOffset = valueOffset + componentCount;
+        const outOffset = valueOffset + componentCount * 2;
+        if (property === "rotation") {
+          inTangent = new Quaternion(values[inOffset], values[inOffset + 1], values[inOffset + 2], values[inOffset + 3]);
+          value = new Quaternion(values[valOffset], values[valOffset + 1], values[valOffset + 2], values[valOffset + 3]);
+          outTangent = new Quaternion(values[outOffset], values[outOffset + 1], values[outOffset + 2], values[outOffset + 3]);
+        } else {
+          inTangent = new Vector3(values[inOffset], values[inOffset + 1], values[inOffset + 2]);
+          value = new Vector3(values[valOffset], values[valOffset + 1], values[valOffset + 2]);
+          outTangent = new Vector3(values[outOffset], values[outOffset + 1], values[outOffset + 2]);
+        }
+      } else {
+        if (property === "rotation") {
+          value = new Quaternion(values[valueOffset], values[valueOffset + 1], values[valueOffset + 2], values[valueOffset + 3]);
+        } else {
+          value = new Vector3(values[valueOffset], values[valueOffset + 1], values[valueOffset + 2]);
+        }
+      }
+      this.keyframes.push({ time, value, inTangent, outTangent });
+    }
+    this.duration = keyframeCount > 0 ? this.keyframes[keyframeCount - 1].time : 0;
+  }
+  sample(time) {
+    if (this.keyframes.length === 0) {
+      return this.property === "rotation" ? Quaternion.identity : Vector3.zero;
+    }
+    if (this.keyframes.length === 1) {
+      return this.keyframes[0].value;
+    }
+    const first = this.keyframes[0];
+    const last = this.keyframes[this.keyframes.length - 1];
+    if (time <= first.time)
+      return first.value;
+    if (time >= last.time)
+      return last.value;
+    let prev = first;
+    let next = this.keyframes[1];
+    for (let i = 1;i < this.keyframes.length; i++) {
+      next = this.keyframes[i];
+      if (next.time >= time) {
+        prev = this.keyframes[i - 1];
+        break;
+      }
+    }
+    const duration = next.time - prev.time;
+    const t = duration > 0 ? (time - prev.time) / duration : 0;
+    switch (this.interpolation) {
+      case "STEP":
+        return prev.value;
+      case "CUBICSPLINE":
+        return this.cubicSplineInterpolate(prev, next, t, duration);
+      case "LINEAR":
+      default:
+        return this.linearInterpolate(prev.value, next.value, t);
+    }
+  }
+  apply(time) {
+    const value = this.sample(time);
+    if (!this._debugLogged) {
+      console.log(`NodeAnimationTrack.apply: "${this.targetNode.name}" ${this.property}`, value);
+      this._debugLogged = true;
+    }
+    switch (this.property) {
+      case "position":
+        this.targetNode.transform.position = value;
+        break;
+      case "rotation":
+        this.targetNode.transform.rotation = value;
+        break;
+      case "scale":
+        this.targetNode.transform.scale = value;
+        break;
+    }
+  }
+  _debugLogged = false;
+  linearInterpolate(a, b, t) {
+    if (a instanceof Quaternion && b instanceof Quaternion) {
+      return a.clone().slerp(b, t);
+    }
+    return a.clone().lerp(b, t);
+  }
+  cubicSplineInterpolate(prev, next, t, duration) {
+    const t2 = t * t;
+    const t3 = t2 * t;
+    const h00 = 2 * t3 - 3 * t2 + 1;
+    const h10 = t3 - 2 * t2 + t;
+    const h01 = -2 * t3 + 3 * t2;
+    const h11 = t3 - t2;
+    if (prev.value instanceof Quaternion) {
+      const p0 = prev.value;
+      const m0 = prev.outTangent;
+      const p1 = next.value;
+      const m1 = next.inTangent;
+      const m0s = new Quaternion(m0.x * duration, m0.y * duration, m0.z * duration, m0.w * duration);
+      const m1s = new Quaternion(m1.x * duration, m1.y * duration, m1.z * duration, m1.w * duration);
+      return new Quaternion(h00 * p0.x + h10 * m0s.x + h01 * p1.x + h11 * m1s.x, h00 * p0.y + h10 * m0s.y + h01 * p1.y + h11 * m1s.y, h00 * p0.z + h10 * m0s.z + h01 * p1.z + h11 * m1s.z, h00 * p0.w + h10 * m0s.w + h01 * p1.w + h11 * m1s.w).normalize();
+    } else {
+      const p0 = prev.value;
+      const m0 = prev.outTangent;
+      const p1 = next.value;
+      const m1 = next.inTangent;
+      const m0s = m0.clone().multiply(duration);
+      const m1s = m1.clone().multiply(duration);
+      return new Vector3(h00 * p0.x + h10 * m0s.x + h01 * p1.x + h11 * m1s.x, h00 * p0.y + h10 * m0s.y + h01 * p1.y + h11 * m1s.y, h00 * p0.z + h10 * m0s.z + h01 * p1.z + h11 * m1s.z);
+    }
+  }
+}
+// ../../src/core/animation/AnimationClip.ts
+class AnimationClip {
+  name;
+  duration = 0;
+  tracks = [];
+  nodeAnimationTracks = [];
+  morphWeightsTracks = [];
+  _trackMap = new Map;
+  constructor(name = "animation") {
+    this.name = name;
+  }
+  addTrack(track) {
+    this.tracks.push(track);
+    if (track.duration > this.duration) {
+      this.duration = track.duration;
+    }
+    const key = this._getTrackKey(track.targetBoneIndex, track.property);
+    this._trackMap.set(key, track);
+  }
+  addMorphWeightsTrack(track) {
+    this.morphWeightsTracks.push(track);
+    if (track.duration > this.duration) {
+      this.duration = track.duration;
+    }
+  }
+  addNodeAnimationTrack(track) {
+    this.nodeAnimationTracks.push(track);
+    if (track.duration > this.duration) {
+      this.duration = track.duration;
+    }
+  }
+  getTrack(boneIndex, property) {
+    const key = this._getTrackKey(boneIndex, property);
+    return this._trackMap.get(key) ?? null;
+  }
+  apply(skeleton, time, weight = 1) {
+    if (weight <= 0)
+      return;
+    if (skeleton) {
+      for (const track of this.tracks) {
+        const bone = skeleton.bones[track.targetBoneIndex];
+        if (!bone)
+          continue;
+        const value = track.sample(time);
+        if (weight >= 1) {
+          this._applyValue(bone, track.property, value);
+        } else {
+          this._blendValue(bone, track.property, value, weight);
+        }
+      }
+    }
+    for (const morphTrack of this.morphWeightsTracks) {
+      const weights = morphTrack.sample(time);
+      if (weight >= 1) {
+        morphTrack.targetMesh.setMorphWeights(weights);
+      } else {
+        const currentWeights = morphTrack.targetMesh.morphTargets.weights;
+        const blendedWeights = new Float32Array(weights.length);
+        for (let i = 0;i < weights.length; i++) {
+          blendedWeights[i] = currentWeights[i] + (weights[i] - currentWeights[i]) * weight;
+        }
+        morphTrack.targetMesh.setMorphWeights(blendedWeights);
+      }
+    }
+    for (const nodeTrack of this.nodeAnimationTracks) {
+      nodeTrack.apply(time);
+    }
+  }
+  _applyValue(bone, property, value) {
+    switch (property) {
+      case "position":
+        bone.position.copy(value);
+        break;
+      case "rotation":
+        bone.rotation.copy(value);
+        break;
+      case "scale":
+        bone.scale.copy(value);
+        break;
+    }
+  }
+  _blendValue(bone, property, value, weight) {
+    switch (property) {
+      case "position": {
+        const v = value;
+        bone.position.set(bone.position.x + (v.x - bone.position.x) * weight, bone.position.y + (v.y - bone.position.y) * weight, bone.position.z + (v.z - bone.position.z) * weight);
+        break;
+      }
+      case "rotation": {
+        const q = value;
+        const blended = bone.rotation.slerp(q, weight);
+        bone.rotation.copy(blended);
+        break;
+      }
+      case "scale": {
+        const s = value;
+        bone.scale.set(bone.scale.x + (s.x - bone.scale.x) * weight, bone.scale.y + (s.y - bone.scale.y) * weight, bone.scale.z + (s.z - bone.scale.z) * weight);
+        break;
+      }
+    }
+  }
+  _getTrackKey(boneIndex, property) {
+    return `${boneIndex}:${property}`;
+  }
+  getAnimatedBoneIndices() {
+    const indices = new Set;
+    for (const track of this.tracks) {
+      indices.add(track.targetBoneIndex);
+    }
+    return Array.from(indices);
+  }
+  animatesBone(boneIndex) {
+    return this.tracks.some((t) => t.targetBoneIndex === boneIndex);
+  }
+  hasMorphTargetAnimations() {
+    return this.morphWeightsTracks.length > 0;
+  }
+  hasNodeAnimations() {
+    return this.nodeAnimationTracks.length > 0;
+  }
+  clone() {
+    const cloned = new AnimationClip(this.name);
+    cloned.duration = this.duration;
+    for (const track of this.tracks) {
+      cloned.addTrack(track);
+    }
+    for (const morphTrack of this.morphWeightsTracks) {
+      cloned.addMorphWeightsTrack(morphTrack);
+    }
+    for (const nodeTrack of this.nodeAnimationTracks) {
+      cloned.addNodeAnimationTrack(nodeTrack);
+    }
+    return cloned;
+  }
+  trim(startTime, endTime) {
+    const cloned = this.clone();
+    cloned.duration = Math.min(cloned.duration, endTime - startTime);
+    return cloned;
+  }
+  getStats() {
+    let keyframeCount = 0;
+    const boneIndices = new Set;
+    for (const track of this.tracks) {
+      keyframeCount += track.keyframes.length;
+      boneIndices.add(track.targetBoneIndex);
+    }
+    let nodeKeyframeCount = 0;
+    for (const nodeTrack of this.nodeAnimationTracks) {
+      nodeKeyframeCount += nodeTrack.keyframes.length;
+    }
+    let morphKeyframeCount = 0;
+    for (const morphTrack of this.morphWeightsTracks) {
+      morphKeyframeCount += morphTrack.keyframes.length;
+    }
+    return {
+      trackCount: this.tracks.length,
+      boneCount: boneIndices.size,
+      keyframeCount,
+      nodeTrackCount: this.nodeAnimationTracks.length,
+      nodeKeyframeCount,
+      morphTrackCount: this.morphWeightsTracks.length,
+      morphKeyframeCount,
+      duration: this.duration
+    };
+  }
+  toString() {
+    const stats = this.getStats();
+    let str = `AnimationClip("${this.name}", duration=${this.duration.toFixed(2)}s, ` + `boneTracks=${stats.trackCount}, bones=${stats.boneCount}`;
+    if (stats.nodeTrackCount > 0) {
+      str += `, nodeTracks=${stats.nodeTrackCount}`;
+    }
+    if (stats.morphTrackCount > 0) {
+      str += `, morphTracks=${stats.morphTrackCount}`;
+    }
+    str += ")";
+    return str;
+  }
+}
+// ../../src/core/animation/AnimationAction.ts
+class AnimationAction {
+  clip;
+  mixer;
+  _time = 0;
+  _timeScale = 1;
+  _weight = 1;
+  _effectiveWeight = 1;
+  _loop = "repeat";
+  _paused = false;
+  _enabled = true;
+  _clampWhenFinished = false;
+  _direction = 1;
+  _fadeStartTime = 0;
+  _fadeDuration = 0;
+  _fadeStartWeight = 0;
+  _fadeTargetWeight = 0;
+  _isFading = false;
+  _repetitions = Infinity;
+  _currentRepetition = 0;
+  constructor(mixer, clip) {
+    this.mixer = mixer;
+    this.clip = clip;
+  }
+  get time() {
+    return this._time;
+  }
+  set time(value) {
+    this._time = value;
+  }
+  get timeScale() {
+    return this._timeScale;
+  }
+  set timeScale(value) {
+    this._timeScale = value;
+  }
+  get weight() {
+    return this._weight;
+  }
+  set weight(value) {
+    this._weight = Math.max(0, Math.min(1, value));
+  }
+  get effectiveWeight() {
+    return this._effectiveWeight;
+  }
+  get loop() {
+    return this._loop;
+  }
+  set loop(value) {
+    this._loop = value;
+  }
+  get paused() {
+    return this._paused;
+  }
+  set paused(value) {
+    this._paused = value;
+  }
+  get enabled() {
+    return this._enabled;
+  }
+  set enabled(value) {
+    this._enabled = value;
+  }
+  get clampWhenFinished() {
+    return this._clampWhenFinished;
+  }
+  set clampWhenFinished(value) {
+    this._clampWhenFinished = value;
+  }
+  get repetitions() {
+    return this._repetitions;
+  }
+  set repetitions(value) {
+    this._repetitions = value;
+  }
+  isRunning() {
+    return this._enabled && !this._paused && this._effectiveWeight > 0;
+  }
+  isScheduled() {
+    return this._enabled;
+  }
+  play() {
+    this._enabled = true;
+    this._paused = false;
+    this.mixer._addAction(this);
+    return this;
+  }
+  stop() {
+    this._enabled = false;
+    this._time = 0;
+    this._currentRepetition = 0;
+    this._direction = 1;
+    this._isFading = false;
+    return this;
+  }
+  reset() {
+    this._time = 0;
+    this._currentRepetition = 0;
+    this._direction = 1;
+    this._paused = false;
+    this._enabled = true;
+    this._isFading = false;
+    this._effectiveWeight = this._weight;
+    return this;
+  }
+  halt() {
+    this._paused = true;
+    return this;
+  }
+  fadeIn(duration) {
+    return this._fade(0, this._weight, duration);
+  }
+  fadeOut(duration) {
+    return this._fade(this._effectiveWeight, 0, duration);
+  }
+  crossFadeTo(otherAction, duration, warp = false) {
+    this.fadeOut(duration);
+    otherAction.fadeIn(duration);
+    otherAction.play();
+    return this;
+  }
+  syncWith(otherAction) {
+    this._time = otherAction._time;
+    return this;
+  }
+  _fade(startWeight, endWeight, duration) {
+    this._fadeStartTime = 0;
+    this._fadeDuration = duration;
+    this._fadeStartWeight = startWeight;
+    this._fadeTargetWeight = endWeight;
+    this._isFading = true;
+    this._effectiveWeight = startWeight;
+    return this;
+  }
+  _update(deltaTime, mixerTime) {
+    if (!this._enabled || this._paused) {
+      return false;
+    }
+    let finished = false;
+    if (this._isFading) {
+      this._fadeStartTime += deltaTime;
+      const fadeProgress = this._fadeDuration > 0 ? Math.min(1, this._fadeStartTime / this._fadeDuration) : 1;
+      this._effectiveWeight = this._fadeStartWeight + (this._fadeTargetWeight - this._fadeStartWeight) * fadeProgress;
+      if (fadeProgress >= 1) {
+        this._isFading = false;
+        this._weight = this._fadeTargetWeight;
+        this._effectiveWeight = this._fadeTargetWeight;
+        if (this._fadeTargetWeight <= 0) {
+          this._enabled = false;
+        }
+      }
+    } else {
+      this._effectiveWeight = this._weight;
+    }
+    const scaledDelta = deltaTime * this._timeScale * this._direction;
+    this._time += scaledDelta;
+    const duration = this.clip.duration;
+    if (duration > 0) {
+      switch (this._loop) {
+        case "once":
+          if (this._time >= duration) {
+            this._time = this._clampWhenFinished ? duration : 0;
+            this._enabled = this._clampWhenFinished;
+            finished = true;
+          } else if (this._time < 0) {
+            this._time = 0;
+            finished = true;
+          }
+          break;
+        case "repeat":
+          while (this._time >= duration) {
+            this._time -= duration;
+            this._currentRepetition++;
+            if (this._currentRepetition >= this._repetitions) {
+              this._time = this._clampWhenFinished ? duration : 0;
+              this._enabled = this._clampWhenFinished;
+              finished = true;
+              break;
+            }
+          }
+          while (this._time < 0) {
+            this._time += duration;
+          }
+          break;
+        case "pingpong":
+          while (this._time >= duration || this._time < 0) {
+            if (this._time >= duration) {
+              this._time = 2 * duration - this._time;
+              this._direction = -1;
+              this._currentRepetition++;
+            } else if (this._time < 0) {
+              this._time = -this._time;
+              this._direction = 1;
+              this._currentRepetition++;
+            }
+            if (this._currentRepetition >= this._repetitions * 2) {
+              this._time = this._clampWhenFinished ? this._direction > 0 ? 0 : duration : 0;
+              this._enabled = this._clampWhenFinished;
+              finished = true;
+              break;
+            }
+          }
+          break;
+      }
+    }
+    return finished;
+  }
+  _apply() {
+    if (!this._enabled || this._effectiveWeight <= 0) {
+      return;
+    }
+    this.clip.apply(this.mixer.skeleton, this._time, this._effectiveWeight);
+  }
+  toString() {
+    return `AnimationAction("${this.clip.name}", time=${this._time.toFixed(2)}, ` + `weight=${this._effectiveWeight.toFixed(2)}, enabled=${this._enabled})`;
+  }
+}
+// ../../src/core/animation/AnimationMixer.ts
+class AnimationMixer {
+  skeleton;
+  _actions = [];
+  _actionsByClip = new Map;
+  _time = 0;
+  _listeners = new Map;
+  _device = null;
+  constructor(skeleton) {
+    this.skeleton = skeleton;
+  }
+  setDevice(device) {
+    this._device = device;
+    this.skeleton.initGPU(device);
+  }
+  clipAction(clip) {
+    let action = this._actionsByClip.get(clip);
+    if (!action) {
+      action = new AnimationAction(this, clip);
+      this._actionsByClip.set(clip, action);
+    }
+    return action;
+  }
+  existingAction(clip) {
+    return this._actionsByClip.get(clip) ?? null;
+  }
+  get actions() {
+    return this._actions.slice();
+  }
+  get time() {
+    return this._time;
+  }
+  update(deltaTime) {
+    this._time += deltaTime;
+    this.skeleton.copyBindPose();
+    let totalWeight = 0;
+    for (const action of this._actions) {
+      if (action.enabled && action.effectiveWeight > 0) {
+        totalWeight += action.effectiveWeight;
+      }
+    }
+    const finishedActions = [];
+    for (const action of this._actions) {
+      if (!action.enabled)
+        continue;
+      const finished = action._update(deltaTime, this._time);
+      if (action.effectiveWeight > 0) {
+        const normalizedWeight = totalWeight > 1 ? action.effectiveWeight / totalWeight : action.effectiveWeight;
+        const originalWeight = action.effectiveWeight;
+        action._effectiveWeight = normalizedWeight;
+        action._apply();
+        action._effectiveWeight = originalWeight;
+      }
+      if (finished) {
+        finishedActions.push(action);
+      }
+    }
+    this.skeleton.update();
+    if (this._device) {
+      this.skeleton.uploadToGPU(this._device);
+    }
+    for (const action of finishedActions) {
+      this._dispatchEvent({
+        type: "finished",
+        action,
+        direction: 1
+      });
+    }
+  }
+  stopAllAction() {
+    for (const action of this._actions) {
+      action.stop();
+    }
+    this._actions.length = 0;
+  }
+  setTimeScaleForAll(scale) {
+    for (const action of this._actions) {
+      action.timeScale = scale;
+    }
+  }
+  getActionByName(name) {
+    for (const [clip, action] of this._actionsByClip) {
+      if (clip.name === name) {
+        return action;
+      }
+    }
+    return null;
+  }
+  addEventListener(type, callback) {
+    let listeners = this._listeners.get(type);
+    if (!listeners) {
+      listeners = [];
+      this._listeners.set(type, listeners);
+    }
+    listeners.push(callback);
+  }
+  removeEventListener(type, callback) {
+    const listeners = this._listeners.get(type);
+    if (listeners) {
+      const index = listeners.indexOf(callback);
+      if (index !== -1) {
+        listeners.splice(index, 1);
+      }
+    }
+  }
+  isPlaying() {
+    return this._actions.some((action) => action.isRunning());
+  }
+  get activeActionCount() {
+    return this._actions.filter((action) => action.isRunning()).length;
+  }
+  _addAction(action) {
+    if (!this._actions.includes(action)) {
+      this._actions.push(action);
+    }
+  }
+  _removeAction(action) {
+    const index = this._actions.indexOf(action);
+    if (index !== -1) {
+      this._actions.splice(index, 1);
+    }
+  }
+  _dispatchEvent(event) {
+    const listeners = this._listeners.get(event.type);
+    if (listeners) {
+      for (const callback of listeners) {
+        callback(event);
+      }
+    }
+  }
+  dispose() {
+    this.stopAllAction();
+    this._actionsByClip.clear();
+    this._listeners.clear();
+    this._device = null;
+  }
+  toString() {
+    return `AnimationMixer(skeleton=${this.skeleton.boneCount} bones, ` + `actions=${this._actions.length}, active=${this.activeActionCount})`;
+  }
+}
+// ../../src/core/animation/SkinnedMesh.ts
+class SkinnedMesh extends Mesh {
+  skeleton = null;
+  bindMatrix = new Matrix4;
+  bindMatrixInverse = new Matrix4;
+  isSkinned = true;
+  jointsBuffer = null;
+  weightsBuffer = null;
+  constructor(geometry, material, skeleton) {
+    super(geometry, material);
+    this.name = "SkinnedMesh";
+    if (skeleton) {
+      this.bind(skeleton);
+    }
+  }
+  bind(skeleton, bindMatrix) {
+    this.skeleton = skeleton;
+    if (bindMatrix) {
+      this.bindMatrix.copy(bindMatrix);
+    } else {
+      this.bindMatrix.identity();
+    }
+    this.bindMatrixInverse.copy(this.bindMatrix).inverse();
+  }
+  initSkinningBuffers(device) {
+    const jointsData = this.geometry.attributes["joints"];
+    if (jointsData && !this.jointsBuffer) {
+      const jointsUint = new Uint32Array(jointsData.length);
+      for (let i = 0;i < jointsData.length; i++) {
+        jointsUint[i] = Math.floor(jointsData[i]);
+      }
+      this.jointsBuffer = device.createBuffer({
+        label: "SkinnedMesh Joints Buffer",
+        size: jointsUint.byteLength,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+      });
+      new Uint32Array(this.jointsBuffer.getMappedRange()).set(jointsUint);
+      this.jointsBuffer.unmap();
+    }
+    const weightsData = this.geometry.attributes["weights"];
+    if (weightsData && !this.weightsBuffer) {
+      this.weightsBuffer = device.createBuffer({
+        label: "SkinnedMesh Weights Buffer",
+        size: weightsData.byteLength,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+      });
+      new Float32Array(this.weightsBuffer.getMappedRange()).set(weightsData);
+      this.weightsBuffer.unmap();
+    }
+    if (this.skeleton) {
+      this.skeleton.initGPU(device);
+    }
+  }
+  hasSkinningData() {
+    return !!(this.geometry.attributes["joints"] && this.geometry.attributes["weights"] && this.skeleton);
+  }
+  get skinnedVertexCount() {
+    const joints = this.geometry.attributes["joints"];
+    return joints ? joints.length / 4 : 0;
+  }
+  prepareSkinning(device) {
+    if (!this.skeleton)
+      return;
+    if (!this.jointsBuffer || !this.weightsBuffer) {
+      this.initSkinningBuffers(device);
+    }
+    this.skeleton.uploadToGPU(device);
+  }
+  normalizeWeights() {
+    const weights = this.geometry.attributes["weights"];
+    if (!weights)
+      return;
+    const vertexCount = weights.length / 4;
+    for (let i = 0;i < vertexCount; i++) {
+      const offset = i * 4;
+      const w0 = weights[offset];
+      const w1 = weights[offset + 1];
+      const w2 = weights[offset + 2];
+      const w3 = weights[offset + 3];
+      const sum = w0 + w1 + w2 + w3;
+      if (sum > 0 && Math.abs(sum - 1) > 0.001) {
+        const invSum = 1 / sum;
+        weights[offset] = w0 * invSum;
+        weights[offset + 1] = w1 * invSum;
+        weights[offset + 2] = w2 * invSum;
+        weights[offset + 3] = w3 * invSum;
+      }
+    }
+    this.geometry.markBuffersDirty();
+    if (this.weightsBuffer) {
+      this.weightsBuffer.destroy();
+      this.weightsBuffer = null;
+    }
+  }
+  clone() {
+    const cloned = new SkinnedMesh(this.geometry, this.material, this.skeleton?.clone());
+    cloned.transform.position.copy(this.transform.position);
+    cloned.transform.rotation.copy(this.transform.rotation);
+    cloned.transform.scale.copy(this.transform.scale);
+    cloned.bindMatrix.copy(this.bindMatrix);
+    cloned.bindMatrixInverse.copy(this.bindMatrixInverse);
+    return cloned;
+  }
+  destroy() {
+    this.jointsBuffer?.destroy();
+    this.weightsBuffer?.destroy();
+    this.jointsBuffer = null;
+    this.weightsBuffer = null;
+  }
+  toString() {
+    return `SkinnedMesh("${this.name}", vertices=${this.geometry.vertexCount}, ` + `skeleton=${this.skeleton?.boneCount ?? 0} bones)`;
+  }
+}
+// ../../src/core/animation/skinning/SkinningShader.ts
+var SKINNING_UNIFORMS = `
+// Bone matrices storage buffer (bind group 2)
+@group(2) @binding(0) var<storage, read> boneMatrices: array<mat4x4<f32>, ${MAX_BONES}>;
+`;
+var SKINNING_RESULT = `
+struct SkinningResult {
+  position: vec3<f32>,
+  normal: vec3<f32>,
+}
+`;
+var APPLY_SKINNING_FUNCTION = `
+fn applySkinning(
+  position: vec3<f32>,
+  normal: vec3<f32>,
+  joints: vec4<u32>,
+  weights: vec4<f32>
+) -> SkinningResult {
+  var skinnedPosition = vec3<f32>(0.0);
+  var skinnedNormal = vec3<f32>(0.0);
+
+  // Apply up to 4 bone influences
+  // Unrolled for performance
+  let bone0 = boneMatrices[joints.x];
+  let bone1 = boneMatrices[joints.y];
+  let bone2 = boneMatrices[joints.z];
+  let bone3 = boneMatrices[joints.w];
+
+  let w0 = weights.x;
+  let w1 = weights.y;
+  let w2 = weights.z;
+  let w3 = weights.w;
+
+  // Position skinning
+  skinnedPosition += w0 * (bone0 * vec4<f32>(position, 1.0)).xyz;
+  skinnedPosition += w1 * (bone1 * vec4<f32>(position, 1.0)).xyz;
+  skinnedPosition += w2 * (bone2 * vec4<f32>(position, 1.0)).xyz;
+  skinnedPosition += w3 * (bone3 * vec4<f32>(position, 1.0)).xyz;
+
+  // Normal skinning (using 3x3 rotation part of matrix)
+  // For uniform scale, this is correct. For non-uniform scale, we'd need inverse transpose.
+  skinnedNormal += w0 * (bone0 * vec4<f32>(normal, 0.0)).xyz;
+  skinnedNormal += w1 * (bone1 * vec4<f32>(normal, 0.0)).xyz;
+  skinnedNormal += w2 * (bone2 * vec4<f32>(normal, 0.0)).xyz;
+  skinnedNormal += w3 * (bone3 * vec4<f32>(normal, 0.0)).xyz;
+
+  return SkinningResult(skinnedPosition, normalize(skinnedNormal));
+}
+`;
+function getSkinningShaderHeader() {
+  return `
+${SKINNING_UNIFORMS}
+${SKINNING_RESULT}
+${APPLY_SKINNING_FUNCTION}
+`;
+}
+function createSkinnedVertexShader(standardVertexShader) {
+  let modifiedShader = standardVertexShader;
+  const skinningHeader = getSkinningShaderHeader();
+  const vertexInputRegex = /struct VertexInput \{[^}]+\}/;
+  const skinnedVertexInput = `struct VertexInput {
+  @location(0) position: vec3<f32>,
+  @location(1) normal: vec3<f32>,
+  @location(2) uv: vec2<f32>,
+  @location(3) joints: vec4<u32>,
+  @location(4) weights: vec4<f32>,
+}`;
+  const vertexInputMatch = modifiedShader.match(vertexInputRegex);
+  console.log("SkinningShader: VertexInput match:", vertexInputMatch ? "found" : "NOT FOUND");
+  modifiedShader = modifiedShader.replace(vertexInputRegex, skinnedVertexInput);
+  const vsMainIndex = modifiedShader.indexOf("@vertex");
+  console.log("SkinningShader: @vertex found at index:", vsMainIndex);
+  if (vsMainIndex > -1) {
+    modifiedShader = modifiedShader.slice(0, vsMainIndex) + skinningHeader + `
+` + modifiedShader.slice(vsMainIndex);
+  }
+  const worldPosPattern = /let worldPos = modelMatrix \* vec4<f32>\(input\.position, 1\.0\);/g;
+  const worldPosMatch = modifiedShader.match(worldPosPattern);
+  console.log("SkinningShader: worldPos (input.position) pattern match:", worldPosMatch ? "found" : "NOT FOUND");
+  let skinnedDefined = false;
+  if (worldPosMatch) {
+    modifiedShader = modifiedShader.replace(worldPosPattern, `let skinned = applySkinning(input.position, input.normal, input.joints, input.weights);
+        let worldPos = modelMatrix * vec4<f32>(skinned.position, 1.0);`);
+    skinnedDefined = true;
+  }
+  const localPosPattern = /let worldPos = modelMatrix \* vec4<f32>\(localPos, 1\.0\);/g;
+  const localPosMatch = modifiedShader.match(localPosPattern);
+  console.log("SkinningShader: worldPos (localPos) pattern match:", localPosMatch ? "found" : "NOT FOUND");
+  if (localPosMatch) {
+    modifiedShader = modifiedShader.replace(/var localPos = input\.position;/g, `let skinned = applySkinning(input.position, input.normal, input.joints, input.weights);
+        var localPos = skinned.position;`);
+    skinnedDefined = true;
+  }
+  const normalPattern = /output\.worldNormal = \(normalMatrix \* vec4<f32>\(input\.normal, 0\.0\)\)\.xyz;/g;
+  const normalMatch = modifiedShader.match(normalPattern);
+  console.log("SkinningShader: normal pattern match:", normalMatch ? "found" : "NOT FOUND");
+  if (skinnedDefined) {
+    modifiedShader = modifiedShader.replace(normalPattern, "output.worldNormal = (normalMatrix * vec4<f32>(skinned.normal, 0.0)).xyz;");
+  }
+  if (skinnedDefined) {
+    const prevWorldPosPattern = /let prevWorldPos = prevModelMatrix \* vec4<f32>\(input\.position, 1\.0\);/g;
+    modifiedShader = modifiedShader.replace(prevWorldPosPattern, "let prevWorldPos = prevModelMatrix * vec4<f32>(skinned.position, 1.0);");
+  }
+  return modifiedShader;
+}
+// ../../src/core/animation/MorphTarget.ts
+var MAX_MORPH_TARGETS = 8;
+class MorphTargets {
+  targets = [];
+  weights;
+  vertexCount;
+  deltasBuffer = null;
+  weightsBuffer = null;
+  bindGroup = null;
+  weightsDirty = true;
+  constructor(vertexCount) {
+    this.vertexCount = vertexCount;
+    this.weights = new Float32Array(MAX_MORPH_TARGETS);
+  }
+  addTarget(target) {
+    if (this.targets.length >= MAX_MORPH_TARGETS) {
+      console.warn(`MorphTargets: Maximum of ${MAX_MORPH_TARGETS} morph targets exceeded. Ignoring target "${target.name}".`);
+      return;
+    }
+    const targetVertexCount = target.positionDeltas.length / 3;
+    if (targetVertexCount !== this.vertexCount) {
+      console.warn(`MorphTargets: Target "${target.name}" has ${targetVertexCount} vertices, expected ${this.vertexCount}`);
+    }
+    target.index = this.targets.length;
+    this.targets.push(target);
+  }
+  getTarget(name) {
+    return this.targets.find((t) => t.name === name) ?? null;
+  }
+  getTargetByIndex(index) {
+    return this.targets[index] ?? null;
+  }
+  setWeight(name, weight) {
+    const target = this.getTarget(name);
+    if (target) {
+      this.setWeightByIndex(target.index, weight);
+    }
+  }
+  setWeightByIndex(index, weight) {
+    if (index >= 0 && index < MAX_MORPH_TARGETS) {
+      const clampedWeight = Math.max(0, Math.min(1, weight));
+      if (this.weights[index] !== clampedWeight) {
+        this.weights[index] = clampedWeight;
+        this.weightsDirty = true;
+      }
+    }
+  }
+  setWeights(weights) {
+    for (let i = 0;i < Math.min(weights.length, MAX_MORPH_TARGETS); i++) {
+      this.weights[i] = Math.max(0, Math.min(1, weights[i]));
+    }
+    this.weightsDirty = true;
+  }
+  getWeight(index) {
+    return this.weights[index] ?? 0;
+  }
+  resetWeights() {
+    this.weights.fill(0);
+    this.weightsDirty = true;
+  }
+  get targetCount() {
+    return this.targets.length;
+  }
+  get isActive() {
+    for (let i = 0;i < this.targets.length; i++) {
+      if (this.weights[i] > 0.001) {
+        return true;
+      }
+    }
+    return false;
+  }
+  initGPU(device) {
+    if (this.targets.length === 0)
+      return;
+    const deltasPerTarget = this.vertexCount * 6;
+    const totalFloats = MAX_MORPH_TARGETS * deltasPerTarget;
+    const deltasData = new Float32Array(totalFloats);
+    for (let t = 0;t < this.targets.length; t++) {
+      const target = this.targets[t];
+      const targetOffset = t * deltasPerTarget;
+      for (let v = 0;v < this.vertexCount; v++) {
+        const srcPosOffset = v * 3;
+        const dstOffset = targetOffset + v * 6;
+        deltasData[dstOffset + 0] = target.positionDeltas[srcPosOffset + 0];
+        deltasData[dstOffset + 1] = target.positionDeltas[srcPosOffset + 1];
+        deltasData[dstOffset + 2] = target.positionDeltas[srcPosOffset + 2];
+        if (target.normalDeltas) {
+          deltasData[dstOffset + 3] = target.normalDeltas[srcPosOffset + 0];
+          deltasData[dstOffset + 4] = target.normalDeltas[srcPosOffset + 1];
+          deltasData[dstOffset + 5] = target.normalDeltas[srcPosOffset + 2];
+        }
+      }
+    }
+    this.deltasBuffer = device.createBuffer({
+      label: "MorphTarget Deltas Buffer",
+      size: deltasData.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      mappedAtCreation: true
+    });
+    new Float32Array(this.deltasBuffer.getMappedRange()).set(deltasData);
+    this.deltasBuffer.unmap();
+    const weightsBufferSize = Math.ceil(MAX_MORPH_TARGETS / 4) * 16;
+    this.weightsBuffer = device.createBuffer({
+      label: "MorphTarget Weights Buffer",
+      size: weightsBufferSize,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    this.uploadWeights(device);
+  }
+  uploadWeights(device) {
+    if (!this.weightsBuffer || !this.weightsDirty)
+      return;
+    const paddedWeights = new Float32Array(Math.ceil(MAX_MORPH_TARGETS / 4) * 4);
+    paddedWeights.set(this.weights);
+    device.queue.writeBuffer(this.weightsBuffer, 0, paddedWeights);
+    this.weightsDirty = false;
+  }
+  static createBindGroupLayout(device) {
+    return device.createBindGroupLayout({
+      label: "MorphTarget BindGroup Layout",
+      entries: [
+        {
+          binding: 0,
+          visibility: GPUShaderStage.VERTEX,
+          buffer: { type: "read-only-storage" }
+        },
+        {
+          binding: 1,
+          visibility: GPUShaderStage.VERTEX,
+          buffer: { type: "uniform" }
+        }
+      ]
+    });
+  }
+  createBindGroup(device, layout) {
+    if (!this.deltasBuffer || !this.weightsBuffer) {
+      console.warn("MorphTargets: Cannot create bind group - buffers not initialized");
+      return;
+    }
+    this.bindGroup = device.createBindGroup({
+      label: "MorphTarget BindGroup",
+      layout,
+      entries: [
+        { binding: 0, resource: { buffer: this.deltasBuffer } },
+        { binding: 1, resource: { buffer: this.weightsBuffer } }
+      ]
+    });
+  }
+  prepare(device) {
+    if (this.weightsDirty && this.weightsBuffer) {
+      this.uploadWeights(device);
+    }
+  }
+  destroy() {
+    this.deltasBuffer?.destroy();
+    this.weightsBuffer?.destroy();
+    this.deltasBuffer = null;
+    this.weightsBuffer = null;
+    this.bindGroup = null;
+  }
+  clone() {
+    const cloned = new MorphTargets(this.vertexCount);
+    for (const target of this.targets) {
+      cloned.targets.push(target);
+    }
+    cloned.weights.set(this.weights);
+    cloned.weightsDirty = true;
+    return cloned;
+  }
+  toString() {
+    const activeTargets = this.targets.filter((_, i) => this.weights[i] > 0.001);
+    return `MorphTargets(${this.targets.length} targets, ${activeTargets.length} active)`;
+  }
+}
+// ../../src/core/animation/MorphTargetMesh.ts
+class MorphTargetMesh extends Mesh {
+  morphTargets;
+  hasMorphTargets = true;
+  morphGPUInitialized = false;
+  constructor(geometry, material, morphTargets) {
+    super(geometry, material);
+    this.name = "MorphTargetMesh";
+    if (morphTargets) {
+      this.morphTargets = morphTargets;
+    } else {
+      this.morphTargets = new MorphTargets(geometry.vertexCount);
+    }
+  }
+  addMorphTarget(target) {
+    this.morphTargets.addTarget(target);
+    this.morphGPUInitialized = false;
+  }
+  setMorphWeight(name, weight) {
+    this.morphTargets.setWeight(name, weight);
+  }
+  setMorphWeightByIndex(index, weight) {
+    this.morphTargets.setWeightByIndex(index, weight);
+  }
+  setMorphWeights(weights) {
+    this.morphTargets.setWeights(weights);
+  }
+  getMorphWeight(index) {
+    return this.morphTargets.getWeight(index);
+  }
+  resetMorphWeights() {
+    this.morphTargets.resetWeights();
+  }
+  get morphTargetCount() {
+    return this.morphTargets.targetCount;
+  }
+  get morphTargetNames() {
+    return this.morphTargets.targets.map((t) => t.name);
+  }
+  get isMorphActive() {
+    return this.morphTargets.isActive;
+  }
+  initMorphGPU(device) {
+    if (this.morphGPUInitialized)
+      return;
+    this.morphTargets.initGPU(device);
+    this.morphGPUInitialized = true;
+    console.log(`MorphTargetMesh: Initialized GPU for "${this.name}" with ${this.morphTargets.targetCount} targets`);
+  }
+  createMorphBindGroup(device, layout) {
+    if (!this.morphGPUInitialized) {
+      this.initMorphGPU(device);
+    }
+    this.morphTargets.createBindGroup(device, layout);
+  }
+  prepareMorph(device) {
+    if (!this.morphGPUInitialized) {
+      this.initMorphGPU(device);
+    }
+    this.morphTargets.prepare(device);
+  }
+  clone() {
+    const cloned = new MorphTargetMesh(this.geometry, this.material, this.morphTargets.clone());
+    cloned.transform.position.copy(this.transform.position);
+    cloned.transform.rotation.copy(this.transform.rotation);
+    cloned.transform.scale.copy(this.transform.scale);
+    return cloned;
+  }
+  destroy() {
+    this.morphTargets.destroy();
+  }
+  toString() {
+    return `MorphTargetMesh("${this.name}", vertices=${this.geometry.vertexCount}, ` + `morphTargets=${this.morphTargets.targetCount})`;
+  }
+}
+// ../../src/core/animation/morphing/MorphTargetShader.ts
+var MORPH_TARGET_UNIFORMS = `
+// Morph target deltas storage buffer (bind group 2 or 3 depending on skinning)
+// Layout: For each target, vertexCount * (3 floats position + 3 floats normal)
+@group(2) @binding(0) var<storage, read> morphDeltas: array<f32>;
+
+// Morph weights uniform buffer
+// Layout: vec4 * ceil(MAX_MORPH_TARGETS / 4)
+@group(2) @binding(1) var<uniform> morphWeights: array<vec4<f32>, ${Math.ceil(MAX_MORPH_TARGETS / 4)}>;
+
+// Constants
+const MAX_MORPH_TARGETS: u32 = ${MAX_MORPH_TARGETS}u;
+`;
+var MORPH_RESULT = `
+struct MorphResult {
+  position: vec3<f32>,
+  normal: vec3<f32>,
+}
+`;
+var APPLY_MORPH_FUNCTION = `
+fn applyMorphTargets(
+  vertexIndex: u32,
+  basePosition: vec3<f32>,
+  baseNormal: vec3<f32>,
+  vertexCount: u32,
+  targetCount: u32
+) -> MorphResult {
+  var morphedPosition = basePosition;
+  var morphedNormal = baseNormal;
+
+  // Each target stores vertexCount * 6 floats (pos.xyz + normal.xyz per vertex)
+  let deltasPerTarget = vertexCount * 6u;
+
+  // Apply each morph target
+  for (var t = 0u; t < targetCount && t < MAX_MORPH_TARGETS; t++) {
+    // Get weight for this target
+    let weightIndex = t / 4u;
+    let weightComponent = t % 4u;
+    var weight: f32;
+    switch (weightComponent) {
+      case 0u: { weight = morphWeights[weightIndex].x; }
+      case 1u: { weight = morphWeights[weightIndex].y; }
+      case 2u: { weight = morphWeights[weightIndex].z; }
+      default: { weight = morphWeights[weightIndex].w; }
+    }
+
+    // Skip if weight is negligible
+    if (weight < 0.001) {
+      continue;
+    }
+
+    // Calculate offset into deltas buffer for this target and vertex
+    let targetOffset = t * deltasPerTarget;
+    let vertexOffset = targetOffset + vertexIndex * 6u;
+
+    // Read position delta
+    let positionDelta = vec3<f32>(
+      morphDeltas[vertexOffset + 0u],
+      morphDeltas[vertexOffset + 1u],
+      morphDeltas[vertexOffset + 2u]
+    );
+
+    // Read normal delta
+    let normalDelta = vec3<f32>(
+      morphDeltas[vertexOffset + 3u],
+      morphDeltas[vertexOffset + 4u],
+      morphDeltas[vertexOffset + 5u]
+    );
+
+    // Apply weighted deltas
+    morphedPosition += weight * positionDelta;
+    morphedNormal += weight * normalDelta;
+  }
+
+  // Normalize the final normal
+  return MorphResult(morphedPosition, normalize(morphedNormal));
+}
+`;
+function getOptimizedMorphFunction(targetCount) {
+  if (targetCount <= 0)
+    return "";
+  let code = `
+fn applyMorphTargetsOptimized(
+  vertexIndex: u32,
+  basePosition: vec3<f32>,
+  baseNormal: vec3<f32>,
+  vertexCount: u32
+) -> MorphResult {
+  var morphedPosition = basePosition;
+  var morphedNormal = baseNormal;
+  let deltasPerTarget = vertexCount * 6u;
+`;
+  for (let t = 0;t < Math.min(targetCount, MAX_MORPH_TARGETS); t++) {
+    const weightIndex = Math.floor(t / 4);
+    const component = ["x", "y", "z", "w"][t % 4];
+    code += `
+  // Target ${t}
+  {
+    let weight = morphWeights[${weightIndex}].${component};
+    if (weight > 0.001) {
+      let vertexOffset = ${t}u * deltasPerTarget + vertexIndex * 6u;
+      morphedPosition += weight * vec3<f32>(
+        morphDeltas[vertexOffset],
+        morphDeltas[vertexOffset + 1u],
+        morphDeltas[vertexOffset + 2u]
+      );
+      morphedNormal += weight * vec3<f32>(
+        morphDeltas[vertexOffset + 3u],
+        morphDeltas[vertexOffset + 4u],
+        morphDeltas[vertexOffset + 5u]
+      );
+    }
+  }`;
+  }
+  code += `
+  return MorphResult(morphedPosition, normalize(morphedNormal));
+}
+`;
+  return code;
+}
+function getMorphTargetShaderHeader() {
+  return `
+${MORPH_TARGET_UNIFORMS}
+${MORPH_RESULT}
+${APPLY_MORPH_FUNCTION}
+`;
+}
+function createMorphedVertexShader(standardVertexShader, targetCount = MAX_MORPH_TARGETS) {
+  let modifiedShader = standardVertexShader;
+  const morphHeader = getMorphTargetShaderHeader();
+  const optimizedMorphFn = targetCount > 0 && targetCount <= 8 ? getOptimizedMorphFunction(targetCount) : "";
+  const vsMainIndex = modifiedShader.indexOf("@vertex");
+  if (vsMainIndex > -1) {
+    modifiedShader = modifiedShader.slice(0, vsMainIndex) + morphHeader + `
+` + optimizedMorphFn + `
+` + modifiedShader.slice(vsMainIndex);
+  }
+  const vsMainFnRegex = /fn vs_main\(input\s*:\s*VertexInput,\s*@builtin\(instance_index\)\s*instanceIndex\s*:\s*u32\)/;
+  modifiedShader = modifiedShader.replace(vsMainFnRegex, "fn vs_main(input: VertexInput, @builtin(instance_index) instanceIndex: u32, @builtin(vertex_index) vertexIndex: u32)");
+  const morphConfigUniform = `
+// Morph configuration: x = vertexCount, y = targetCount
+var<private> morphConfig: vec2<u32>;
+`;
+  const morphHeaderEndIndex = modifiedShader.indexOf(APPLY_MORPH_FUNCTION) + APPLY_MORPH_FUNCTION.length;
+  if (morphHeaderEndIndex > APPLY_MORPH_FUNCTION.length) {
+    modifiedShader = modifiedShader.slice(0, morphHeaderEndIndex) + morphConfigUniform + modifiedShader.slice(morphHeaderEndIndex);
+  }
+  const worldPosPattern = /let worldPos = modelMatrix \* vec4<f32>\(input\.position, 1\.0\);/g;
+  const worldPosMatch = modifiedShader.match(worldPosPattern);
+  let morphedDefined = false;
+  if (worldPosMatch) {
+    modifiedShader = modifiedShader.replace(worldPosPattern, `// Apply morph targets
+        let morphed = applyMorphTargets(vertexIndex, input.position, input.normal, ${targetCount}u, ${targetCount}u);
+        let worldPos = modelMatrix * vec4<f32>(morphed.position, 1.0);`);
+    morphedDefined = true;
+  }
+  const localPosPattern = /let worldPos = modelMatrix \* vec4<f32>\(localPos, 1\.0\);/g;
+  const localPosMatch = modifiedShader.match(localPosPattern);
+  if (localPosMatch) {
+    modifiedShader = modifiedShader.replace(/var localPos = input\.position;/g, `let morphed = applyMorphTargets(vertexIndex, input.position, input.normal, ${targetCount}u, ${targetCount}u);
+        var localPos = morphed.position;`);
+    morphedDefined = true;
+  }
+  if (morphedDefined) {
+    const normalPattern = /output\.worldNormal = \(normalMatrix \* vec4<f32>\(input\.normal, 0\.0\)\)\.xyz;/g;
+    modifiedShader = modifiedShader.replace(normalPattern, "output.worldNormal = (normalMatrix * vec4<f32>(morphed.normal, 0.0)).xyz;");
+    const prevWorldPosPattern = /let prevWorldPos = prevModelMatrix \* vec4<f32>\(input\.position, 1\.0\);/g;
+    modifiedShader = modifiedShader.replace(prevWorldPosPattern, "let prevWorldPos = prevModelMatrix * vec4<f32>(morphed.position, 1.0);");
+  }
+  return modifiedShader;
+}
+// ../../src/core/animation/Easing.ts
+var linear = (t) => t;
+var easeInQuad = (t) => t * t;
+var easeOutQuad = (t) => 1 - (1 - t) * (1 - t);
+var easeInOutQuad = (t) => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+var easeInCubic = (t) => t * t * t;
+var easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+var easeInOutCubic = (t) => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+var easeInQuart = (t) => t * t * t * t;
+var easeOutQuart = (t) => 1 - Math.pow(1 - t, 4);
+var easeInOutQuart = (t) => t < 0.5 ? 8 * t * t * t * t : 1 - Math.pow(-2 * t + 2, 4) / 2;
+var easeInQuint = (t) => t * t * t * t * t;
+var easeOutQuint = (t) => 1 - Math.pow(1 - t, 5);
+var easeInOutQuint = (t) => t < 0.5 ? 16 * t * t * t * t * t : 1 - Math.pow(-2 * t + 2, 5) / 2;
+var easeInSine = (t) => 1 - Math.cos(t * Math.PI / 2);
+var easeOutSine = (t) => Math.sin(t * Math.PI / 2);
+var easeInOutSine = (t) => -(Math.cos(Math.PI * t) - 1) / 2;
+var easeInExpo = (t) => t === 0 ? 0 : Math.pow(2, 10 * t - 10);
+var easeOutExpo = (t) => t === 1 ? 1 : 1 - Math.pow(2, -10 * t);
+var easeInOutExpo = (t) => t === 0 ? 0 : t === 1 ? 1 : t < 0.5 ? Math.pow(2, 20 * t - 10) / 2 : (2 - Math.pow(2, -20 * t + 10)) / 2;
+var easeInCirc = (t) => 1 - Math.sqrt(1 - Math.pow(t, 2));
+var easeOutCirc = (t) => Math.sqrt(1 - Math.pow(t - 1, 2));
+var easeInOutCirc = (t) => t < 0.5 ? (1 - Math.sqrt(1 - Math.pow(2 * t, 2))) / 2 : (Math.sqrt(1 - Math.pow(-2 * t + 2, 2)) + 1) / 2;
+var c4 = 2 * Math.PI / 3;
+var c5 = 2 * Math.PI / 4.5;
+var easeInElastic = (t) => t === 0 ? 0 : t === 1 ? 1 : -Math.pow(2, 10 * t - 10) * Math.sin((t * 10 - 10.75) * c4);
+var easeOutElastic = (t) => t === 0 ? 0 : t === 1 ? 1 : Math.pow(2, -10 * t) * Math.sin((t * 10 - 0.75) * c4) + 1;
+var easeInOutElastic = (t) => t === 0 ? 0 : t === 1 ? 1 : t < 0.5 ? -(Math.pow(2, 20 * t - 10) * Math.sin((20 * t - 11.125) * c5)) / 2 : Math.pow(2, -20 * t + 10) * Math.sin((20 * t - 11.125) * c5) / 2 + 1;
+var c1 = 1.70158;
+var c2 = c1 * 1.525;
+var c3 = c1 + 1;
+var easeInBack = (t) => c3 * t * t * t - c1 * t * t;
+var easeOutBack = (t) => 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+var easeInOutBack = (t) => t < 0.5 ? Math.pow(2 * t, 2) * ((c2 + 1) * 2 * t - c2) / 2 : (Math.pow(2 * t - 2, 2) * ((c2 + 1) * (t * 2 - 2) + c2) + 2) / 2;
+var n1 = 7.5625;
+var d1 = 2.75;
+var easeOutBounce = (t) => {
+  if (t < 1 / d1) {
+    return n1 * t * t;
+  } else if (t < 2 / d1) {
+    return n1 * (t -= 1.5 / d1) * t + 0.75;
+  } else if (t < 2.5 / d1) {
+    return n1 * (t -= 2.25 / d1) * t + 0.9375;
+  } else {
+    return n1 * (t -= 2.625 / d1) * t + 0.984375;
+  }
+};
+var easeInBounce = (t) => 1 - easeOutBounce(1 - t);
+var easeInOutBounce = (t) => t < 0.5 ? (1 - easeOutBounce(1 - 2 * t)) / 2 : (1 + easeOutBounce(2 * t - 1)) / 2;
+var Easing = {
+  linear,
+  easeInQuad,
+  easeOutQuad,
+  easeInOutQuad,
+  easeInCubic,
+  easeOutCubic,
+  easeInOutCubic,
+  easeInQuart,
+  easeOutQuart,
+  easeInOutQuart,
+  easeInQuint,
+  easeOutQuint,
+  easeInOutQuint,
+  easeInSine,
+  easeOutSine,
+  easeInOutSine,
+  easeInExpo,
+  easeOutExpo,
+  easeInOutExpo,
+  easeInCirc,
+  easeOutCirc,
+  easeInOutCirc,
+  easeInElastic,
+  easeOutElastic,
+  easeInOutElastic,
+  easeInBack,
+  easeOutBack,
+  easeInOutBack,
+  easeInBounce,
+  easeOutBounce,
+  easeInOutBounce
+};
+function getEasing(name) {
+  if (typeof name === "function") {
+    return name;
+  }
+  return Easing[name] ?? linear;
+}
+// ../../src/core/animation/Tween.ts
+function isVector2(value) {
+  return value instanceof Vector2 || typeof value === "object" && value !== null && "x" in value && "y" in value && !("z" in value);
+}
+function isVector3(value) {
+  return value instanceof Vector3 || typeof value === "object" && value !== null && "x" in value && "y" in value && "z" in value;
+}
+function isColor(value) {
+  return typeof value === "object" && value !== null && "r" in value && "g" in value && "b" in value;
+}
+function interpolate(start, end, t) {
+  if (typeof start === "number" && typeof end === "number") {
+    return start + (end - start) * t;
+  }
+  if (isVector3(start) && isVector3(end)) {
+    return new Vector3(start.x + (end.x - start.x) * t, start.y + (end.y - start.y) * t, start.z + (end.z - start.z) * t);
+  }
+  if (isVector2(start) && isVector2(end)) {
+    return new Vector2(start.x + (end.x - start.x) * t, start.y + (end.y - start.y) * t);
+  }
+  if (isColor(start) && isColor(end)) {
+    return {
+      r: start.r + (end.r - start.r) * t,
+      g: start.g + (end.g - start.g) * t,
+      b: start.b + (end.b - start.b) * t,
+      a: (start.a ?? 1) + ((end.a ?? 1) - (start.a ?? 1)) * t
+    };
+  }
+  return start;
+}
+function cloneValue(value) {
+  if (typeof value === "number") {
+    return value;
+  }
+  if (isVector3(value)) {
+    return new Vector3(value.x, value.y, value.z);
+  }
+  if (isVector2(value)) {
+    return new Vector2(value.x, value.y);
+  }
+  if (isColor(value)) {
+    return { r: value.r, g: value.g, b: value.b, a: value.a };
+  }
+  return value;
+}
+function applyValue(target, key, value) {
+  const obj = target;
+  const existing = obj[key];
+  if (typeof value === "number") {
+    obj[key] = value;
+  } else if (isVector3(value) && isVector3(existing)) {
+    existing.x = value.x;
+    existing.y = value.y;
+    existing.z = value.z;
+  } else if (isVector2(value) && isVector2(existing)) {
+    existing.x = value.x;
+    existing.y = value.y;
+  } else if (isColor(value) && isColor(existing)) {
+    existing.r = value.r;
+    existing.g = value.g;
+    existing.b = value.b;
+    if (value.a !== undefined) {
+      existing.a = value.a;
+    }
+  } else {
+    obj[key] = value;
+  }
+}
+
+class Tween {
+  target;
+  startValues = new Map;
+  endValues = new Map;
+  _state = "idle";
+  _elapsed = 0;
+  _delayElapsed = 0;
+  _repeatCount = 0;
+  _reversed = false;
+  _started = false;
+  duration = 1;
+  delay = 0;
+  easing = linear;
+  repeat = 0;
+  repeatDelay = 0;
+  yoyo = false;
+  onStartCallback;
+  onUpdateCallback;
+  onCompleteCallback;
+  onRepeatCallback;
+  onStopCallback;
+  chainedTween;
+  _manager;
+  constructor(target, options) {
+    this.target = target;
+    if (options) {
+      this.configure(options);
+    }
+  }
+  configure(options) {
+    if (options.duration !== undefined)
+      this.duration = options.duration;
+    if (options.delay !== undefined)
+      this.delay = options.delay;
+    if (options.easing !== undefined)
+      this.easing = getEasing(options.easing);
+    if (options.repeat !== undefined)
+      this.repeat = options.repeat;
+    if (options.repeatDelay !== undefined)
+      this.repeatDelay = options.repeatDelay;
+    if (options.yoyo !== undefined)
+      this.yoyo = options.yoyo;
+    if (options.onStart !== undefined)
+      this.onStartCallback = options.onStart;
+    if (options.onUpdate !== undefined)
+      this.onUpdateCallback = options.onUpdate;
+    if (options.onComplete !== undefined)
+      this.onCompleteCallback = options.onComplete;
+    if (options.onRepeat !== undefined)
+      this.onRepeatCallback = options.onRepeat;
+    if (options.onStop !== undefined)
+      this.onStopCallback = options.onStop;
+    return this;
+  }
+  to(values, duration) {
+    if (duration !== undefined) {
+      this.duration = duration;
+    }
+    for (const key of Object.keys(values)) {
+      const targetValue = this.target[key];
+      const endValue = values[key];
+      if (targetValue !== undefined && endValue !== undefined) {
+        this.startValues.set(key, cloneValue(targetValue));
+        this.endValues.set(key, cloneValue(endValue));
+      }
+    }
+    return this;
+  }
+  from(values) {
+    for (const key of Object.keys(values)) {
+      const value = values[key];
+      if (value !== undefined) {
+        this.startValues.set(key, cloneValue(value));
+      }
+    }
+    return this;
+  }
+  setDuration(duration) {
+    this.duration = duration;
+    return this;
+  }
+  setDelay(delay) {
+    this.delay = delay;
+    return this;
+  }
+  setEasing(easing) {
+    this.easing = getEasing(easing);
+    return this;
+  }
+  setRepeat(count) {
+    this.repeat = count;
+    return this;
+  }
+  setRepeatDelay(delay) {
+    this.repeatDelay = delay;
+    return this;
+  }
+  setYoyo(enabled) {
+    this.yoyo = enabled;
+    return this;
+  }
+  onStart(callback) {
+    this.onStartCallback = callback;
+    return this;
+  }
+  onUpdate(callback) {
+    this.onUpdateCallback = callback;
+    return this;
+  }
+  onComplete(callback) {
+    this.onCompleteCallback = callback;
+    return this;
+  }
+  onRepeat(callback) {
+    this.onRepeatCallback = callback;
+    return this;
+  }
+  onStop(callback) {
+    this.onStopCallback = callback;
+    return this;
+  }
+  chain(tween) {
+    this.chainedTween = tween;
+    return tween;
+  }
+  start() {
+    if (this._state === "running")
+      return this;
+    this._state = "running";
+    this._elapsed = 0;
+    this._delayElapsed = 0;
+    this._repeatCount = 0;
+    this._reversed = false;
+    this._started = false;
+    for (const key of this.endValues.keys()) {
+      if (!this.startValues.has(key)) {
+        const currentValue = this.target[key];
+        if (currentValue !== undefined) {
+          this.startValues.set(key, cloneValue(currentValue));
+        }
+      }
+    }
+    return this;
+  }
+  stop() {
+    if (this._state !== "running" && this._state !== "paused")
+      return this;
+    this._state = "completed";
+    this.onStopCallback?.();
+    if (this._manager) {
+      this._manager.remove(this);
+    }
+    return this;
+  }
+  pause() {
+    if (this._state === "running") {
+      this._state = "paused";
+    }
+    return this;
+  }
+  resume() {
+    if (this._state === "paused") {
+      this._state = "running";
+    }
+    return this;
+  }
+  reset() {
+    this._state = "idle";
+    this._elapsed = 0;
+    this._delayElapsed = 0;
+    this._repeatCount = 0;
+    this._reversed = false;
+    this._started = false;
+    for (const [key, startValue] of this.startValues) {
+      applyValue(this.target, key, startValue);
+    }
+    return this;
+  }
+  get state() {
+    return this._state;
+  }
+  get progress() {
+    if (this.duration === 0)
+      return 1;
+    return Math.min(this._elapsed / this.duration, 1);
+  }
+  get elapsed() {
+    return this._elapsed;
+  }
+  get isRunning() {
+    return this._state === "running";
+  }
+  get isComplete() {
+    return this._state === "completed";
+  }
+  setManager(manager) {
+    this._manager = manager;
+  }
+  getTarget() {
+    return this.target;
+  }
+  update(dt) {
+    if (this._state !== "running") {
+      return this._state !== "completed";
+    }
+    if (this._delayElapsed < this.delay) {
+      this._delayElapsed += dt;
+      if (this._delayElapsed < this.delay) {
+        return true;
+      }
+      dt = this._delayElapsed - this.delay;
+    }
+    if (!this._started) {
+      this._started = true;
+      this.onStartCallback?.();
+    }
+    this._elapsed += dt;
+    let progress = this.duration > 0 ? Math.min(this._elapsed / this.duration, 1) : 1;
+    if (this._reversed) {
+      progress = 1 - progress;
+    }
+    const easedProgress = this.easing(progress);
+    for (const [key, startValue] of this.startValues) {
+      const endValue = this.endValues.get(key);
+      if (endValue !== undefined) {
+        const value = interpolate(startValue, endValue, easedProgress);
+        applyValue(this.target, key, value);
+      }
+    }
+    this.onUpdateCallback?.(this._reversed ? 1 - progress : progress);
+    if (this._elapsed >= this.duration) {
+      if (this.repeat === -1 || this._repeatCount < this.repeat) {
+        this._repeatCount++;
+        this._elapsed = 0;
+        if (this.yoyo) {
+          this._reversed = !this._reversed;
+        }
+        if (this.repeatDelay > 0) {
+          this._delayElapsed = this.delay - this.repeatDelay;
+        }
+        this.onRepeatCallback?.(this._repeatCount);
+        return true;
+      }
+      this._state = "completed";
+      this.onCompleteCallback?.();
+      if (this.chainedTween) {
+        this.chainedTween.start();
+      }
+      return false;
+    }
+    return true;
+  }
+}
+// ../../src/core/animation/TweenManager.ts
+class TweenManager {
+  tweens = new Set;
+  static _instance = null;
+  static get instance() {
+    if (!TweenManager._instance) {
+      TweenManager._instance = new TweenManager;
+    }
+    return TweenManager._instance;
+  }
+  create(target, options) {
+    const tween = new Tween(target, options);
+    tween.setManager(this);
+    this.tweens.add(tween);
+    return tween;
+  }
+  add(tween) {
+    tween.setManager(this);
+    this.tweens.add(tween);
+    return this;
+  }
+  remove(tween) {
+    this.tweens.delete(tween);
+    return this;
+  }
+  update(dt) {
+    for (const tween of this.tweens) {
+      const shouldContinue = tween.update(dt);
+      if (!shouldContinue) {
+        this.tweens.delete(tween);
+      }
+    }
+  }
+  stopAll() {
+    for (const tween of this.tweens) {
+      tween.stop();
+    }
+    this.tweens.clear();
+  }
+  pauseAll() {
+    for (const tween of this.tweens) {
+      tween.pause();
+    }
+  }
+  resumeAll() {
+    for (const tween of this.tweens) {
+      tween.resume();
+    }
+  }
+  getTweensForTarget(target) {
+    const result = [];
+    for (const tween of this.tweens) {
+      if (tween.getTarget() === target) {
+        result.push(tween);
+      }
+    }
+    return result;
+  }
+  stopTweensForTarget(target) {
+    const tweens = this.getTweensForTarget(target);
+    for (const tween of tweens) {
+      tween.stop();
+      this.tweens.delete(tween);
+    }
+  }
+  get count() {
+    return this.tweens.size;
+  }
+  get hasActiveTweens() {
+    return this.tweens.size > 0;
+  }
+  clear() {
+    this.tweens.clear();
+  }
+}
 // ../../src/core/renderer/ForwardRenderPass.ts
 function usesGlobalResources(material) {
   return typeof material.createBindGroupLayout === "function";
@@ -14349,6 +16595,9 @@ class ForwardRenderPass {
         }
         if (this.gBuffer) {
           if (node.material instanceof StandardMaterial || node.material instanceof TerrainMaterial) {
+            if (node instanceof SkinnedMesh) {
+              return;
+            }
             if (node.material.getRenderingPath() === "deferred") {
               return;
             }
@@ -17016,15 +19265,18 @@ async function initDraco() {
             const jsUrl = decoderPath + 'draco_decoder.js';
             const wasmUrl = decoderPath + 'draco_decoder.wasm';
 
-            // Load the decoder JS
-            const jsResponse = await fetch(jsUrl);
-            if (!jsResponse.ok) {
-                throw new Error('Failed to fetch Draco decoder JS: ' + jsResponse.status);
+            // Load the decoder JS - use importScripts if available (Web Worker),
+            // otherwise fall back to fetch + eval (MystralNative Worker polyfill)
+            if (typeof importScripts === 'function') {
+                console.log('[Draco Worker] Loading decoder via importScripts (WebWorker)');
+                importScripts(jsUrl);
+            } else {
+                console.warn('[Draco Worker] importScripts not available, falling back to fetch + eval (not compatible with AOT/MystralScript)');
+                const jsResponse = await fetch(jsUrl);
+                if (!jsResponse.ok) throw new Error('Failed to fetch Draco decoder JS: ' + jsResponse.status);
+                const jsCode = await jsResponse.text();
+                (0, eval)(jsCode);
             }
-            const jsCode = await jsResponse.text();
-
-            // The Draco decoder exports DracoDecoderModule
-            const DracoModule = eval('(' + jsCode + ')');
 
             // Load WASM binary
             const wasmResponse = await fetch(wasmUrl);
@@ -17033,9 +19285,9 @@ async function initDraco() {
             }
             const wasmBinary = await wasmResponse.arrayBuffer();
 
-            // Initialize Draco module
+            // Initialize Draco module - DracoDecoderModule is now in global scope
             dracoModule = await new Promise((resolve, reject) => {
-                DracoModule({
+                DracoDecoderModule({
                     wasmBinary: wasmBinary,
                 }).then(resolve).catch(reject);
             });
@@ -17182,6 +19434,12 @@ class GLBLoader {
   materials = new Map;
   externalBuffers = new Map;
   options;
+  skeletons = new Map;
+  nodeToJointIndex = new Map;
+  skinnedMeshes = [];
+  morphTargetMeshes = [];
+  nodeIndexToNode = new Map;
+  meshIndexToMorphMesh = new Map;
   static dracoWorker = null;
   static dracoInitPromise = null;
   static dracoRequestId = 0;
@@ -17198,7 +19456,27 @@ class GLBLoader {
     if (this.options.dracoDecoderPath === "cdn") {
       return "https://www.gstatic.com/draco/versioned/decoders/1.5.6/";
     }
-    return this.options.dracoDecoderPath || "./draco/";
+    let path = this.options.dracoDecoderPath || "/draco/";
+    if (path.startsWith("http://") || path.startsWith("https://")) {
+      return path;
+    }
+    if (typeof document !== "undefined") {
+      const baseURI = document.baseURI;
+      const url = new URL(path, baseURI);
+      return url.href;
+    }
+    if (typeof window !== "undefined") {
+      const base = window.location.origin;
+      if (path.startsWith("/")) {
+        return base + path;
+      } else {
+        const currentPath = window.location.pathname;
+        const lastSlash = currentPath.lastIndexOf("/");
+        const basePath = lastSlash >= 0 ? currentPath.substring(0, lastSlash + 1) : "/";
+        return base + basePath + path;
+      }
+    }
+    return path;
   }
   async initDracoWorker() {
     const dracoPath = this.getDracoPath();
@@ -17332,10 +19610,24 @@ class GLBLoader {
     }
     this.textures.clear();
     this.materials.clear();
+    this.skeletons.clear();
+    this.nodeToJointIndex.clear();
+    this.skinnedMeshes = [];
+    this.morphTargetMeshes = [];
+    this.nodeIndexToNode.clear();
+    this.meshIndexToMorphMesh.clear();
     await this.loadTextures(gltf, null, baseUrl);
     this.loadMaterials(gltf);
+    this.parseSkins(gltf, null);
     const rootNode = await this.buildSceneGraph(gltf, null);
-    return { rootNode };
+    const animations = this.parseAnimations(gltf, null);
+    return {
+      rootNode,
+      animations,
+      skeletons: this.skeletons,
+      skinnedMeshes: this.skinnedMeshes,
+      morphTargetMeshes: this.morphTargetMeshes
+    };
   }
   async parseGLB(buffer, baseUrl) {
     const dataView = new DataView(buffer);
@@ -17370,14 +19662,28 @@ class GLBLoader {
     this.externalBuffers.clear();
     this.textures.clear();
     this.materials.clear();
+    this.skeletons.clear();
+    this.nodeToJointIndex.clear();
+    this.skinnedMeshes = [];
+    this.morphTargetMeshes = [];
+    this.nodeIndexToNode.clear();
+    this.meshIndexToMorphMesh.clear();
     if (gltf.textures && gltf.images) {
       await this.loadTextures(gltf, binChunk, baseUrl);
     }
     if (gltf.materials) {
       this.loadMaterials(gltf);
     }
+    this.parseSkins(gltf, binChunk);
     const rootNode = await this.buildSceneGraph(gltf, binChunk);
-    return { rootNode };
+    const animations = this.parseAnimations(gltf, binChunk);
+    return {
+      rootNode,
+      animations,
+      skeletons: this.skeletons,
+      skinnedMeshes: this.skinnedMeshes,
+      morphTargetMeshes: this.morphTargetMeshes
+    };
   }
   async loadTextures(gltf, binChunk, baseUrl) {
     if (!gltf.textures || !gltf.images)
@@ -17396,19 +19702,32 @@ class GLBLoader {
         imageSource = texDef.extensions.EXT_texture_webp.source;
       }
       if (imageSource === undefined) {
-        return;
+        console.warn(`GLBLoader: Texture ${i} has no source, skipping`);
+        continue;
       }
       const imgDef = gltf.images[imageSource];
       if (!imgDef) {
-        return;
+        console.warn(`GLBLoader: Texture ${i} references missing image ${imageSource}, skipping`);
+        continue;
       }
       try {
         let imageData = null;
         let mimeType = imgDef.mimeType || "image/png";
-        if (imgDef.bufferView !== undefined && binChunk) {
+        if (imgDef.bufferView !== undefined) {
           const bufferView = gltf.bufferViews[imgDef.bufferView];
+          const bufferIndex = bufferView.buffer || 0;
           const start = bufferView.byteOffset || 0;
-          imageData = binChunk.slice(start, start + bufferView.byteLength);
+          let bufferData = null;
+          if (binChunk && bufferIndex === 0) {
+            bufferData = binChunk;
+          } else {
+            bufferData = this.externalBuffers.get(bufferIndex) || null;
+          }
+          if (bufferData) {
+            imageData = bufferData.slice(start, start + bufferView.byteLength);
+          } else {
+            console.warn(`GLBLoader: Texture ${i} references buffer ${bufferIndex} which is not loaded`);
+          }
         } else if (imgDef.uri) {
           if (imgDef.uri.startsWith("data:")) {
             const base64 = imgDef.uri.split(",")[1];
@@ -17442,12 +19761,13 @@ class GLBLoader {
         }
         if (imageData) {
           const blob = new Blob([imageData], { type: mimeType });
-          const bitmap = await createImageBitmap(blob);
+          const bitmap = await createImageBitmap(blob, { colorSpaceConversion: "none" });
           const isSrgb = this.isColorTexture(gltf, i);
           const texture = new Texture(`GLB Texture ${i}`, { srgb: isSrgb });
           texture.createFromImageBitmap(this.device, bitmap);
           this.textures.set(i, texture);
-          console.log(`GLBLoader: Loaded texture ${i} (${bitmap.width}x${bitmap.height}, sRGB=${isSrgb})`);
+        } else {
+          console.warn(`GLBLoader: No image data found for texture ${i} (bufferView=${imgDef.bufferView}, uri=${imgDef.uri})`);
         }
       } catch (e) {
         console.error(`GLBLoader: Failed to load texture ${i}:`, e);
@@ -17476,6 +19796,9 @@ class GLBLoader {
       if (pbr) {
         if (pbr.baseColorFactor) {
           material.albedo = new Vector3(pbr.baseColorFactor[0], pbr.baseColorFactor[1], pbr.baseColorFactor[2]);
+          if (pbr.baseColorFactor.length > 3) {
+            material.opacity = pbr.baseColorFactor[3];
+          }
         }
         if (pbr.baseColorTexture?.index !== undefined) {
           const tex = this.textures.get(pbr.baseColorTexture.index);
@@ -17510,6 +19833,17 @@ class GLBLoader {
         if (tex)
           material.emissiveMap = tex;
       }
+      if (matDef.alphaMode) {
+        material.alphaMode = matDef.alphaMode;
+      }
+      if (matDef.alphaCutoff !== undefined) {
+        material.alphaCutoff = matDef.alphaCutoff;
+      } else if (matDef.alphaMode === "MASK") {
+        material.alphaCutoff = 0.5;
+      }
+      if (matDef.doubleSided) {
+        material.doubleSided = true;
+      }
       this.materials.set(i, material);
     }
   }
@@ -17533,11 +19867,14 @@ class GLBLoader {
         if (nodeDef.scale) {
           node.transform.scale = new Vector3(nodeDef.scale[0], nodeDef.scale[1], nodeDef.scale[2]);
         }
-        if (nodeDef.mesh !== undefined && gltf.meshes && binChunk) {
+        const hasBufferData = binChunk !== null || this.externalBuffers.size > 0;
+        if (nodeDef.mesh !== undefined && gltf.meshes && hasBufferData) {
           const meshDef = gltf.meshes[nodeDef.mesh];
-          await this.createMesh(node, meshDef, gltf, binChunk);
+          const skinIdx = nodeDef.skin;
+          await this.createMesh(node, meshDef, gltf, binChunk, skinIdx, nodeDef.mesh);
         }
         nodeMap.set(i, node);
+        this.nodeIndexToNode.set(i, node);
       }
     }
     if (gltf.nodes) {
@@ -17585,11 +19922,13 @@ class GLBLoader {
     }
     return rootNode;
   }
-  async createMesh(node, meshDef, gltf, binChunk) {
+  async createMesh(node, meshDef, gltf, binChunk, skinIdx, meshIdx) {
     for (const primDef of meshDef.primitives) {
       const geometry = new Geometry;
+      const hasSkin = skinIdx !== undefined && this.skeletons.has(skinIdx);
+      const hasMorphTargets = primDef.targets && primDef.targets.length > 0;
       const dracoExt = primDef.extensions?.KHR_draco_mesh_compression;
-      if (dracoExt) {
+      if (dracoExt && binChunk) {
         const bufferView = gltf.bufferViews?.[dracoExt.bufferView];
         if (!bufferView) {
           console.error("GLBLoader: Draco extension references missing bufferView");
@@ -17598,7 +19937,6 @@ class GLBLoader {
         const start = bufferView.byteOffset || 0;
         const compressedData = binChunk.slice(start, start + bufferView.byteLength);
         try {
-          console.log(`GLBLoader: Decoding Draco mesh (${bufferView.byteLength} bytes)...`);
           const decoded = await this.decodeDraco(compressedData, dracoExt.attributes);
           if (decoded.positions) {
             geometry.setAttribute("position", decoded.positions);
@@ -17612,16 +19950,15 @@ class GLBLoader {
           if (decoded.indices) {
             geometry.setIndices(decoded.indices);
           }
-          console.log(`GLBLoader: Draco decoded - ${decoded.positions?.length / 3 || 0} vertices, ${decoded.indices?.length / 3 || 0} triangles`);
         } catch (e) {
           console.error("GLBLoader: Failed to decode Draco mesh:", e);
           continue;
         }
       } else {
         if (primDef.attributes.POSITION !== undefined) {
-          const positions2 = this.readAccessor(gltf, binChunk, primDef.attributes.POSITION);
-          if (positions2) {
-            geometry.setAttribute("position", positions2);
+          const positions = this.readAccessor(gltf, binChunk, primDef.attributes.POSITION);
+          if (positions) {
+            geometry.setAttribute("position", positions);
           }
         }
         if (primDef.attributes.NORMAL !== undefined) {
@@ -17642,6 +19979,20 @@ class GLBLoader {
             geometry.setAttribute("tangent", tangents);
           }
         }
+        if (hasSkin) {
+          if (primDef.attributes.JOINTS_0 !== undefined) {
+            const joints = this.readAccessor(gltf, binChunk, primDef.attributes.JOINTS_0);
+            if (joints) {
+              geometry.setAttribute("joints", new Float32Array(joints));
+            }
+          }
+          if (primDef.attributes.WEIGHTS_0 !== undefined) {
+            const weights = this.readAccessor(gltf, binChunk, primDef.attributes.WEIGHTS_0);
+            if (weights) {
+              geometry.setAttribute("weights", weights);
+            }
+          }
+        }
         if (primDef.indices !== undefined) {
           const indices = this.readAccessor(gltf, binChunk, primDef.indices);
           if (indices) {
@@ -17650,34 +20001,165 @@ class GLBLoader {
         }
       }
       const material = primDef.material !== undefined ? this.materials.get(primDef.material) : new StandardMaterial;
-      const mesh = new Mesh(geometry, material || new StandardMaterial);
-      mesh.name = meshDef.name || "GLB Mesh";
-      console.log(`GLBLoader: Created mesh "${mesh.name}" with ${geometry.vertexCount} vertices`);
-      if (geometry.attributes["position"]) {
-        const pos = geometry.attributes["position"];
-        console.log(`GLBLoader: Position attribute has ${pos.length} floats (${pos.length / 3} vertices)`);
-      }
-      if (geometry.indices) {
-        console.log(`GLBLoader: Indices: ${geometry.indices.length} (${geometry.indices.length / 3} triangles)`);
-      } else {
-        console.log(`GLBLoader: No indices set!`);
-      }
-      const positions = geometry.attributes["position"];
-      if (positions) {
-        let minX = Infinity, minY = Infinity, minZ = Infinity;
-        let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-        for (let i = 0;i < positions.length; i += 3) {
-          minX = Math.min(minX, positions[i]);
-          maxX = Math.max(maxX, positions[i]);
-          minY = Math.min(minY, positions[i + 1]);
-          maxY = Math.max(maxY, positions[i + 1]);
-          minZ = Math.min(minZ, positions[i + 2]);
-          maxZ = Math.max(maxZ, positions[i + 2]);
+      let mesh;
+      if (hasSkin) {
+        const skeleton = this.skeletons.get(skinIdx);
+        const skinnedMesh = new SkinnedMesh(geometry, material || new StandardMaterial, skeleton);
+        skinnedMesh.name = meshDef.name || "GLB SkinnedMesh";
+        this.skinnedMeshes.push(skinnedMesh);
+        mesh = skinnedMesh;
+        console.log(`GLBLoader: Created SkinnedMesh "${skinnedMesh.name}" with ${skeleton.boneCount} bones`);
+      } else if (hasMorphTargets) {
+        const vertexCount = geometry.vertexCount;
+        const morphTargets = new MorphTargets(vertexCount);
+        for (let targetIdx = 0;targetIdx < primDef.targets.length; targetIdx++) {
+          const targetDef = primDef.targets[targetIdx];
+          const positionDeltas = targetDef.POSITION !== undefined ? this.readAccessor(gltf, binChunk, targetDef.POSITION) : null;
+          if (!positionDeltas)
+            continue;
+          const normalDeltas = targetDef.NORMAL !== undefined ? this.readAccessor(gltf, binChunk, targetDef.NORMAL) : null;
+          const tangentDeltas = targetDef.TANGENT !== undefined ? this.readAccessor(gltf, binChunk, targetDef.TANGENT) : null;
+          let targetName = `target_${targetIdx}`;
+          if (gltf.meshes && meshIdx !== undefined) {
+            const meshDefWithExtras = gltf.meshes[meshIdx];
+            if (meshDefWithExtras.extras?.targetNames?.[targetIdx]) {
+              targetName = meshDefWithExtras.extras.targetNames[targetIdx];
+            }
+          }
+          morphTargets.addTarget({
+            name: targetName,
+            index: targetIdx,
+            positionDeltas,
+            normalDeltas,
+            tangentDeltas
+          });
         }
-        console.log(`GLBLoader: Bounds: (${minX.toFixed(2)}, ${minY.toFixed(2)}, ${minZ.toFixed(2)}) to (${maxX.toFixed(2)}, ${maxY.toFixed(2)}, ${maxZ.toFixed(2)})`);
+        if (meshDef.weights) {
+          morphTargets.setWeights(meshDef.weights);
+        }
+        const morphMesh = new MorphTargetMesh(geometry, material || new StandardMaterial, morphTargets);
+        morphMesh.name = meshDef.name || "GLB MorphTargetMesh";
+        this.morphTargetMeshes.push(morphMesh);
+        if (meshIdx !== undefined) {
+          this.meshIndexToMorphMesh.set(meshIdx, morphMesh);
+        }
+        mesh = morphMesh;
+        console.log(`GLBLoader: Created MorphTargetMesh "${morphMesh.name}" with ${morphTargets.targetCount} targets`);
+      } else {
+        mesh = new Mesh(geometry, material || new StandardMaterial);
+        mesh.name = meshDef.name || "GLB Mesh";
       }
       node.addChild(mesh);
     }
+  }
+  parseSkins(gltf, binChunk) {
+    if (!gltf.skins || !gltf.nodes)
+      return;
+    for (let skinIdx = 0;skinIdx < gltf.skins.length; skinIdx++) {
+      const skinDef = gltf.skins[skinIdx];
+      let inverseBindMatrices = [];
+      if (skinDef.inverseBindMatrices !== undefined) {
+        const ibmData = this.readAccessor(gltf, binChunk, skinDef.inverseBindMatrices);
+        if (ibmData) {
+          const floatData = ibmData instanceof Float32Array ? ibmData : new Float32Array(ibmData);
+          for (let i = 0;i < skinDef.joints.length; i++) {
+            const offset = i * 16;
+            const matrix = new Matrix4;
+            matrix.elements.set(floatData.subarray(offset, offset + 16));
+            inverseBindMatrices.push(matrix);
+          }
+        }
+      }
+      const nodeParents = new Map;
+      for (let i = 0;i < gltf.nodes.length; i++) {
+        const node = gltf.nodes[i];
+        if (node.children) {
+          for (const childIdx of node.children) {
+            nodeParents.set(childIdx, i);
+          }
+        }
+      }
+      const jointNodeSet = new Set(skinDef.joints);
+      const bonesData = [];
+      const nodeToJoint = new Map;
+      for (let jointIdx = 0;jointIdx < skinDef.joints.length; jointIdx++) {
+        nodeToJoint.set(skinDef.joints[jointIdx], jointIdx);
+      }
+      this.nodeToJointIndex.set(skinIdx, nodeToJoint);
+      for (let jointIdx = 0;jointIdx < skinDef.joints.length; jointIdx++) {
+        const nodeIdx = skinDef.joints[jointIdx];
+        const nodeDef = gltf.nodes[nodeIdx];
+        let parentBoneIdx = -1;
+        let parentNodeIdx = nodeParents.get(nodeIdx);
+        while (parentNodeIdx !== undefined) {
+          if (jointNodeSet.has(parentNodeIdx)) {
+            parentBoneIdx = nodeToJoint.get(parentNodeIdx);
+            break;
+          }
+          parentNodeIdx = nodeParents.get(parentNodeIdx);
+        }
+        const position = nodeDef.translation ? new Vector3(nodeDef.translation[0], nodeDef.translation[1], nodeDef.translation[2]) : new Vector3(0, 0, 0);
+        const rotation = nodeDef.rotation ? new Quaternion(nodeDef.rotation[0], nodeDef.rotation[1], nodeDef.rotation[2], nodeDef.rotation[3]) : new Quaternion(0, 0, 0, 1);
+        const scale = nodeDef.scale ? new Vector3(nodeDef.scale[0], nodeDef.scale[1], nodeDef.scale[2]) : new Vector3(1, 1, 1);
+        const inverseBindMatrix = inverseBindMatrices[jointIdx] || Matrix4.identity.clone();
+        bonesData.push({
+          name: nodeDef.name || `Joint_${jointIdx}`,
+          index: jointIdx,
+          parentIndex: parentBoneIdx,
+          localBindPose: { position, rotation, scale },
+          inverseBindMatrix
+        });
+      }
+      const skeleton = new Skeleton(bonesData);
+      this.skeletons.set(skinIdx, skeleton);
+      console.log(`GLBLoader: Parsed skin ${skinIdx} "${skinDef.name || "unnamed"}" with ${bonesData.length} bones`);
+    }
+  }
+  parseAnimations(gltf, binChunk) {
+    const animations = [];
+    if (!gltf.animations || !gltf.nodes)
+      return animations;
+    for (let animIdx = 0;animIdx < gltf.animations.length; animIdx++) {
+      const animDef = gltf.animations[animIdx];
+      const clip = new AnimationClip(animDef.name || `Animation_${animIdx}`);
+      for (const channel of animDef.channels) {
+        const samplerDef = animDef.samplers[channel.sampler];
+        const targetNodeIdx = channel.target.node;
+        const property = channel.target.path;
+        if (targetNodeIdx === undefined)
+          continue;
+        const timesData = this.readAccessor(gltf, binChunk, samplerDef.input);
+        if (!timesData)
+          continue;
+        const times = timesData instanceof Float32Array ? timesData : new Float32Array(timesData);
+        const valuesData = this.readAccessor(gltf, binChunk, samplerDef.output);
+        if (!valuesData)
+          continue;
+        const values = valuesData instanceof Float32Array ? valuesData : new Float32Array(valuesData);
+        const interpolation = samplerDef.interpolation || "LINEAR";
+        let foundBone = false;
+        for (const [_skinIdx, nodeToJoint] of this.nodeToJointIndex.entries()) {
+          const jointIdx = nodeToJoint.get(targetNodeIdx);
+          if (jointIdx !== undefined && property !== "weights") {
+            const track = new AnimationTrack(jointIdx, property, interpolation, times, values);
+            clip.addTrack(track);
+            foundBone = true;
+            break;
+          }
+        }
+        if (!foundBone && property !== "weights") {
+          const targetNode = this.nodeIndexToNode.get(targetNodeIdx);
+          if (targetNode) {
+            const nodeTrack = new NodeAnimationTrack(targetNode, property, interpolation, times, values);
+            clip.addNodeAnimationTrack(nodeTrack);
+          }
+        }
+        if (property === "weights") {}
+      }
+      animations.push(clip);
+      console.log(`GLBLoader: Parsed animation "${clip.name}" - ${clip.tracks.length} bone tracks, ${clip.nodeAnimationTracks.length} node tracks, duration=${clip.duration.toFixed(2)}s`);
+    }
+    return animations;
   }
   readAccessor(gltf, binChunk, accessorIdx) {
     const accessor = gltf.accessors?.[accessorIdx];
@@ -17748,18 +20230,6 @@ class GLBLoader {
       const data = new ArrayType(bufferData, byteOffset, elementCount);
       return data;
     }
-  }
-}
-async function loadGLBModel(device, url) {
-  const loader = new GLBLoader(device);
-  try {
-    console.log(`loadGLBModel: Loading ${url}...`);
-    const result = await loader.load(url);
-    console.log(`loadGLBModel: Loaded ${url}`, result.rootNode);
-    return result.rootNode;
-  } catch (e) {
-    console.error(`loadGLBModel: Failed to load ${url}`, e);
-    return null;
   }
 }
 
@@ -18538,1990 +21008,6 @@ class InstancedMesh extends Node {
   }
 }
 
-// ../../src/core/animation/Bone.ts
-class Bone {
-  name;
-  index;
-  parent = null;
-  children = [];
-  bindPosition;
-  bindRotation;
-  bindScale;
-  inverseBindMatrix;
-  _position;
-  _rotation;
-  _scale;
-  _localMatrix = new Matrix4;
-  _worldMatrix = new Matrix4;
-  _finalMatrix = new Matrix4;
-  _localMatrixDirty = true;
-  _worldMatrixDirty = true;
-  constructor(data) {
-    this.name = data.name;
-    this.index = data.index;
-    this.bindPosition = data.localBindPose.position.clone();
-    this.bindRotation = data.localBindPose.rotation.clone();
-    this.bindScale = data.localBindPose.scale.clone();
-    this.inverseBindMatrix = data.inverseBindMatrix.clone();
-    this._position = this.bindPosition.clone();
-    this._rotation = this.bindRotation.clone();
-    this._scale = this.bindScale.clone();
-  }
-  get position() {
-    return this._position;
-  }
-  set position(value) {
-    this._position.copy(value);
-    this._markLocalDirty();
-  }
-  get rotation() {
-    return this._rotation;
-  }
-  set rotation(value) {
-    this._rotation.copy(value);
-    this._markLocalDirty();
-  }
-  get scale() {
-    return this._scale;
-  }
-  set scale(value) {
-    this._scale.copy(value);
-    this._markLocalDirty();
-  }
-  get localMatrix() {
-    if (this._localMatrixDirty) {
-      this.updateLocalMatrix();
-    }
-    return this._localMatrix;
-  }
-  get worldMatrix() {
-    if (this._worldMatrixDirty) {
-      this.updateWorldMatrix();
-    }
-    return this._worldMatrix;
-  }
-  get finalMatrix() {
-    if (this._worldMatrixDirty) {
-      this.updateWorldMatrix();
-    }
-    return this._finalMatrix;
-  }
-  updateLocalMatrix() {
-    this._localMatrix.compose(this._position, this._rotation.toMatrix4(), this._scale);
-    this._localMatrixDirty = false;
-  }
-  updateWorldMatrix() {
-    if (this._localMatrixDirty) {
-      this.updateLocalMatrix();
-    }
-    if (this.parent) {
-      this._worldMatrix.multiplyMatrices(this.parent.worldMatrix, this._localMatrix);
-    } else {
-      this._worldMatrix.copy(this._localMatrix);
-    }
-    this._finalMatrix.multiplyMatrices(this._worldMatrix, this.inverseBindMatrix);
-    this._worldMatrixDirty = false;
-  }
-  copyBindPose() {
-    this._position.copy(this.bindPosition);
-    this._rotation.copy(this.bindRotation);
-    this._scale.copy(this.bindScale);
-    this._markLocalDirty();
-  }
-  setPosition(x, y, z) {
-    this._position.set(x, y, z);
-    this._markLocalDirty();
-  }
-  setRotation(x, y, z, w) {
-    this._rotation.x = x;
-    this._rotation.y = y;
-    this._rotation.z = z;
-    this._rotation.w = w;
-    this._markLocalDirty();
-  }
-  setScale(x, y, z) {
-    this._scale.set(x, y, z);
-    this._markLocalDirty();
-  }
-  addChild(bone) {
-    if (bone.parent) {
-      bone.parent.removeChild(bone);
-    }
-    bone.parent = this;
-    this.children.push(bone);
-    bone._markWorldDirty();
-  }
-  removeChild(bone) {
-    const index = this.children.indexOf(bone);
-    if (index !== -1) {
-      this.children.splice(index, 1);
-      bone.parent = null;
-    }
-  }
-  _markLocalDirty() {
-    this._localMatrixDirty = true;
-    this._markWorldDirty();
-  }
-  _markWorldDirty() {
-    this._worldMatrixDirty = true;
-    for (const child of this.children) {
-      child._markWorldDirty();
-    }
-  }
-  clone() {
-    const cloned = new Bone({
-      name: this.name,
-      index: this.index,
-      parentIndex: this.parent?.index ?? -1,
-      localBindPose: {
-        position: this.bindPosition.clone(),
-        rotation: this.bindRotation.clone(),
-        scale: this.bindScale.clone()
-      },
-      inverseBindMatrix: this.inverseBindMatrix.clone()
-    });
-    cloned._position.copy(this._position);
-    cloned._rotation.copy(this._rotation);
-    cloned._scale.copy(this._scale);
-    return cloned;
-  }
-  toString() {
-    return `Bone(${this.name}, index=${this.index}, parent=${this.parent?.name ?? "none"})`;
-  }
-}
-// ../../src/core/animation/Skeleton.ts
-var MAX_BONES = 128;
-
-class Skeleton {
-  bones = [];
-  bonesByName = new Map;
-  rootBones = [];
-  boneMatricesBuffer = null;
-  bindGroup = null;
-  _boneMatrices;
-  _gpuDirty = true;
-  _device = null;
-  constructor(bonesData) {
-    this._boneMatrices = new Float32Array(MAX_BONES * 16);
-    for (const data of bonesData) {
-      const bone = new Bone(data);
-      this.bones[bone.index] = bone;
-      this.bonesByName.set(bone.name, bone);
-    }
-    for (const data of bonesData) {
-      const bone = this.bones[data.index];
-      if (data.parentIndex >= 0 && data.parentIndex < this.bones.length) {
-        const parent = this.bones[data.parentIndex];
-        if (parent) {
-          parent.addChild(bone);
-        }
-      } else {
-        this.rootBones.push(bone);
-      }
-    }
-  }
-  getBone(name) {
-    return this.bonesByName.get(name) ?? null;
-  }
-  getBoneIndex(name) {
-    const bone = this.bonesByName.get(name);
-    return bone?.index ?? -1;
-  }
-  get boneCount() {
-    return this.bones.length;
-  }
-  update() {
-    for (const root of this.rootBones) {
-      this._updateBoneRecursive(root);
-    }
-    this._gpuDirty = true;
-  }
-  _updateBoneRecursive(bone) {
-    bone.updateWorldMatrix();
-    for (const child of bone.children) {
-      this._updateBoneRecursive(child);
-    }
-  }
-  initGPU(device) {
-    if (this._device === device && this.boneMatricesBuffer) {
-      return;
-    }
-    this._device = device;
-    this.boneMatricesBuffer = device.createBuffer({
-      label: `Skeleton Bone Matrices (${this.boneCount} bones)`,
-      size: MAX_BONES * 16 * 4,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-    });
-    this.uploadToGPU(device);
-  }
-  static createBindGroupLayout(device) {
-    return device.createBindGroupLayout({
-      label: "Skeleton Bind Group Layout",
-      entries: [
-        {
-          binding: 0,
-          visibility: GPUShaderStage.VERTEX,
-          buffer: {
-            type: "read-only-storage"
-          }
-        }
-      ]
-    });
-  }
-  createBindGroup(device, layout) {
-    if (!this.boneMatricesBuffer) {
-      this.initGPU(device);
-    }
-    this.bindGroup = device.createBindGroup({
-      label: "Skeleton Bind Group",
-      layout,
-      entries: [
-        {
-          binding: 0,
-          resource: { buffer: this.boneMatricesBuffer }
-        }
-      ]
-    });
-    return this.bindGroup;
-  }
-  uploadToGPU(device) {
-    if (!this._gpuDirty)
-      return;
-    if (!this.boneMatricesBuffer) {
-      this.initGPU(device);
-    }
-    for (let i = 0;i < this.bones.length; i++) {
-      const bone = this.bones[i];
-      if (bone) {
-        const matrix = bone.finalMatrix;
-        const offset = i * 16;
-        this._boneMatrices.set(matrix.elements, offset);
-      }
-    }
-    const identityElements = Matrix4.identity.elements;
-    for (let i = this.bones.length;i < MAX_BONES; i++) {
-      const offset = i * 16;
-      this._boneMatrices.set(identityElements, offset);
-    }
-    device.queue.writeBuffer(this.boneMatricesBuffer, 0, this._boneMatrices.buffer, this._boneMatrices.byteOffset, this._boneMatrices.byteLength);
-    this._gpuDirty = false;
-  }
-  getBoneMatrices() {
-    return this._boneMatrices;
-  }
-  copyBindPose() {
-    for (const bone of this.bones) {
-      if (bone) {
-        bone.copyBindPose();
-      }
-    }
-    this._gpuDirty = true;
-  }
-  clone() {
-    const bonesData = this.bones.map((bone) => ({
-      name: bone.name,
-      index: bone.index,
-      parentIndex: bone.parent?.index ?? -1,
-      localBindPose: {
-        position: bone.bindPosition.clone(),
-        rotation: bone.bindRotation.clone(),
-        scale: bone.bindScale.clone()
-      },
-      inverseBindMatrix: bone.inverseBindMatrix.clone()
-    }));
-    const cloned = new Skeleton(bonesData);
-    for (let i = 0;i < this.bones.length; i++) {
-      const srcBone = this.bones[i];
-      const dstBone = cloned.bones[i];
-      if (srcBone && dstBone) {
-        dstBone.position.copy(srcBone.position);
-        dstBone.rotation.copy(srcBone.rotation);
-        dstBone.scale.copy(srcBone.scale);
-      }
-    }
-    return cloned;
-  }
-  traverse(callback) {
-    const traverseRecursive = (bone) => {
-      callback(bone);
-      for (const child of bone.children) {
-        traverseRecursive(child);
-      }
-    };
-    for (const root of this.rootBones) {
-      traverseRecursive(root);
-    }
-  }
-  destroy() {
-    this.boneMatricesBuffer?.destroy();
-    this.boneMatricesBuffer = null;
-    this.bindGroup = null;
-    this._device = null;
-  }
-  toString() {
-    return `Skeleton(${this.boneCount} bones, ${this.rootBones.length} roots)`;
-  }
-}
-// ../../src/core/animation/AnimationClip.ts
-class AnimationClip {
-  name;
-  duration = 0;
-  tracks = [];
-  nodeAnimationTracks = [];
-  morphWeightsTracks = [];
-  _trackMap = new Map;
-  constructor(name = "animation") {
-    this.name = name;
-  }
-  addTrack(track) {
-    this.tracks.push(track);
-    if (track.duration > this.duration) {
-      this.duration = track.duration;
-    }
-    const key = this._getTrackKey(track.targetBoneIndex, track.property);
-    this._trackMap.set(key, track);
-  }
-  addMorphWeightsTrack(track) {
-    this.morphWeightsTracks.push(track);
-    if (track.duration > this.duration) {
-      this.duration = track.duration;
-    }
-  }
-  addNodeAnimationTrack(track) {
-    this.nodeAnimationTracks.push(track);
-    if (track.duration > this.duration) {
-      this.duration = track.duration;
-    }
-  }
-  getTrack(boneIndex, property) {
-    const key = this._getTrackKey(boneIndex, property);
-    return this._trackMap.get(key) ?? null;
-  }
-  apply(skeleton, time, weight = 1) {
-    if (weight <= 0)
-      return;
-    if (skeleton) {
-      for (const track of this.tracks) {
-        const bone = skeleton.bones[track.targetBoneIndex];
-        if (!bone)
-          continue;
-        const value = track.sample(time);
-        if (weight >= 1) {
-          this._applyValue(bone, track.property, value);
-        } else {
-          this._blendValue(bone, track.property, value, weight);
-        }
-      }
-    }
-    for (const morphTrack of this.morphWeightsTracks) {
-      const weights = morphTrack.sample(time);
-      if (weight >= 1) {
-        morphTrack.targetMesh.setMorphWeights(weights);
-      } else {
-        const currentWeights = morphTrack.targetMesh.morphTargets.weights;
-        const blendedWeights = new Float32Array(weights.length);
-        for (let i = 0;i < weights.length; i++) {
-          blendedWeights[i] = currentWeights[i] + (weights[i] - currentWeights[i]) * weight;
-        }
-        morphTrack.targetMesh.setMorphWeights(blendedWeights);
-      }
-    }
-    for (const nodeTrack of this.nodeAnimationTracks) {
-      nodeTrack.apply(time);
-    }
-  }
-  _applyValue(bone, property, value) {
-    switch (property) {
-      case "position":
-        bone.position.copy(value);
-        break;
-      case "rotation":
-        bone.rotation.copy(value);
-        break;
-      case "scale":
-        bone.scale.copy(value);
-        break;
-    }
-  }
-  _blendValue(bone, property, value, weight) {
-    switch (property) {
-      case "position": {
-        const v = value;
-        bone.position.set(bone.position.x + (v.x - bone.position.x) * weight, bone.position.y + (v.y - bone.position.y) * weight, bone.position.z + (v.z - bone.position.z) * weight);
-        break;
-      }
-      case "rotation": {
-        const q = value;
-        const blended = bone.rotation.slerp(q, weight);
-        bone.rotation.copy(blended);
-        break;
-      }
-      case "scale": {
-        const s = value;
-        bone.scale.set(bone.scale.x + (s.x - bone.scale.x) * weight, bone.scale.y + (s.y - bone.scale.y) * weight, bone.scale.z + (s.z - bone.scale.z) * weight);
-        break;
-      }
-    }
-  }
-  _getTrackKey(boneIndex, property) {
-    return `${boneIndex}:${property}`;
-  }
-  getAnimatedBoneIndices() {
-    const indices = new Set;
-    for (const track of this.tracks) {
-      indices.add(track.targetBoneIndex);
-    }
-    return Array.from(indices);
-  }
-  animatesBone(boneIndex) {
-    return this.tracks.some((t) => t.targetBoneIndex === boneIndex);
-  }
-  hasMorphTargetAnimations() {
-    return this.morphWeightsTracks.length > 0;
-  }
-  hasNodeAnimations() {
-    return this.nodeAnimationTracks.length > 0;
-  }
-  clone() {
-    const cloned = new AnimationClip(this.name);
-    cloned.duration = this.duration;
-    for (const track of this.tracks) {
-      cloned.addTrack(track);
-    }
-    for (const morphTrack of this.morphWeightsTracks) {
-      cloned.addMorphWeightsTrack(morphTrack);
-    }
-    for (const nodeTrack of this.nodeAnimationTracks) {
-      cloned.addNodeAnimationTrack(nodeTrack);
-    }
-    return cloned;
-  }
-  trim(startTime, endTime) {
-    const cloned = this.clone();
-    cloned.duration = Math.min(cloned.duration, endTime - startTime);
-    return cloned;
-  }
-  getStats() {
-    let keyframeCount = 0;
-    const boneIndices = new Set;
-    for (const track of this.tracks) {
-      keyframeCount += track.keyframes.length;
-      boneIndices.add(track.targetBoneIndex);
-    }
-    let nodeKeyframeCount = 0;
-    for (const nodeTrack of this.nodeAnimationTracks) {
-      nodeKeyframeCount += nodeTrack.keyframes.length;
-    }
-    let morphKeyframeCount = 0;
-    for (const morphTrack of this.morphWeightsTracks) {
-      morphKeyframeCount += morphTrack.keyframes.length;
-    }
-    return {
-      trackCount: this.tracks.length,
-      boneCount: boneIndices.size,
-      keyframeCount,
-      nodeTrackCount: this.nodeAnimationTracks.length,
-      nodeKeyframeCount,
-      morphTrackCount: this.morphWeightsTracks.length,
-      morphKeyframeCount,
-      duration: this.duration
-    };
-  }
-  toString() {
-    const stats = this.getStats();
-    let str = `AnimationClip("${this.name}", duration=${this.duration.toFixed(2)}s, ` + `boneTracks=${stats.trackCount}, bones=${stats.boneCount}`;
-    if (stats.nodeTrackCount > 0) {
-      str += `, nodeTracks=${stats.nodeTrackCount}`;
-    }
-    if (stats.morphTrackCount > 0) {
-      str += `, morphTracks=${stats.morphTrackCount}`;
-    }
-    str += ")";
-    return str;
-  }
-}
-// ../../src/core/animation/AnimationAction.ts
-class AnimationAction {
-  clip;
-  mixer;
-  _time = 0;
-  _timeScale = 1;
-  _weight = 1;
-  _effectiveWeight = 1;
-  _loop = "repeat";
-  _paused = false;
-  _enabled = true;
-  _clampWhenFinished = false;
-  _direction = 1;
-  _fadeStartTime = 0;
-  _fadeDuration = 0;
-  _fadeStartWeight = 0;
-  _fadeTargetWeight = 0;
-  _isFading = false;
-  _repetitions = Infinity;
-  _currentRepetition = 0;
-  constructor(mixer, clip) {
-    this.mixer = mixer;
-    this.clip = clip;
-  }
-  get time() {
-    return this._time;
-  }
-  set time(value) {
-    this._time = value;
-  }
-  get timeScale() {
-    return this._timeScale;
-  }
-  set timeScale(value) {
-    this._timeScale = value;
-  }
-  get weight() {
-    return this._weight;
-  }
-  set weight(value) {
-    this._weight = Math.max(0, Math.min(1, value));
-  }
-  get effectiveWeight() {
-    return this._effectiveWeight;
-  }
-  get loop() {
-    return this._loop;
-  }
-  set loop(value) {
-    this._loop = value;
-  }
-  get paused() {
-    return this._paused;
-  }
-  set paused(value) {
-    this._paused = value;
-  }
-  get enabled() {
-    return this._enabled;
-  }
-  set enabled(value) {
-    this._enabled = value;
-  }
-  get clampWhenFinished() {
-    return this._clampWhenFinished;
-  }
-  set clampWhenFinished(value) {
-    this._clampWhenFinished = value;
-  }
-  get repetitions() {
-    return this._repetitions;
-  }
-  set repetitions(value) {
-    this._repetitions = value;
-  }
-  isRunning() {
-    return this._enabled && !this._paused && this._effectiveWeight > 0;
-  }
-  isScheduled() {
-    return this._enabled;
-  }
-  play() {
-    this._enabled = true;
-    this._paused = false;
-    this.mixer._addAction(this);
-    return this;
-  }
-  stop() {
-    this._enabled = false;
-    this._time = 0;
-    this._currentRepetition = 0;
-    this._direction = 1;
-    this._isFading = false;
-    return this;
-  }
-  reset() {
-    this._time = 0;
-    this._currentRepetition = 0;
-    this._direction = 1;
-    this._paused = false;
-    this._enabled = true;
-    this._isFading = false;
-    this._effectiveWeight = this._weight;
-    return this;
-  }
-  halt() {
-    this._paused = true;
-    return this;
-  }
-  fadeIn(duration) {
-    return this._fade(0, this._weight, duration);
-  }
-  fadeOut(duration) {
-    return this._fade(this._effectiveWeight, 0, duration);
-  }
-  crossFadeTo(otherAction, duration, warp = false) {
-    this.fadeOut(duration);
-    otherAction.fadeIn(duration);
-    otherAction.play();
-    return this;
-  }
-  syncWith(otherAction) {
-    this._time = otherAction._time;
-    return this;
-  }
-  _fade(startWeight, endWeight, duration) {
-    this._fadeStartTime = 0;
-    this._fadeDuration = duration;
-    this._fadeStartWeight = startWeight;
-    this._fadeTargetWeight = endWeight;
-    this._isFading = true;
-    this._effectiveWeight = startWeight;
-    return this;
-  }
-  _update(deltaTime, mixerTime) {
-    if (!this._enabled || this._paused) {
-      return false;
-    }
-    let finished = false;
-    if (this._isFading) {
-      this._fadeStartTime += deltaTime;
-      const fadeProgress = this._fadeDuration > 0 ? Math.min(1, this._fadeStartTime / this._fadeDuration) : 1;
-      this._effectiveWeight = this._fadeStartWeight + (this._fadeTargetWeight - this._fadeStartWeight) * fadeProgress;
-      if (fadeProgress >= 1) {
-        this._isFading = false;
-        this._weight = this._fadeTargetWeight;
-        this._effectiveWeight = this._fadeTargetWeight;
-        if (this._fadeTargetWeight <= 0) {
-          this._enabled = false;
-        }
-      }
-    } else {
-      this._effectiveWeight = this._weight;
-    }
-    const scaledDelta = deltaTime * this._timeScale * this._direction;
-    this._time += scaledDelta;
-    const duration = this.clip.duration;
-    if (duration > 0) {
-      switch (this._loop) {
-        case "once":
-          if (this._time >= duration) {
-            this._time = this._clampWhenFinished ? duration : 0;
-            this._enabled = this._clampWhenFinished;
-            finished = true;
-          } else if (this._time < 0) {
-            this._time = 0;
-            finished = true;
-          }
-          break;
-        case "repeat":
-          while (this._time >= duration) {
-            this._time -= duration;
-            this._currentRepetition++;
-            if (this._currentRepetition >= this._repetitions) {
-              this._time = this._clampWhenFinished ? duration : 0;
-              this._enabled = this._clampWhenFinished;
-              finished = true;
-              break;
-            }
-          }
-          while (this._time < 0) {
-            this._time += duration;
-          }
-          break;
-        case "pingpong":
-          while (this._time >= duration || this._time < 0) {
-            if (this._time >= duration) {
-              this._time = 2 * duration - this._time;
-              this._direction = -1;
-              this._currentRepetition++;
-            } else if (this._time < 0) {
-              this._time = -this._time;
-              this._direction = 1;
-              this._currentRepetition++;
-            }
-            if (this._currentRepetition >= this._repetitions * 2) {
-              this._time = this._clampWhenFinished ? this._direction > 0 ? 0 : duration : 0;
-              this._enabled = this._clampWhenFinished;
-              finished = true;
-              break;
-            }
-          }
-          break;
-      }
-    }
-    return finished;
-  }
-  _apply() {
-    if (!this._enabled || this._effectiveWeight <= 0) {
-      return;
-    }
-    this.clip.apply(this.mixer.skeleton, this._time, this._effectiveWeight);
-  }
-  toString() {
-    return `AnimationAction("${this.clip.name}", time=${this._time.toFixed(2)}, ` + `weight=${this._effectiveWeight.toFixed(2)}, enabled=${this._enabled})`;
-  }
-}
-// ../../src/core/animation/AnimationMixer.ts
-class AnimationMixer {
-  skeleton;
-  _actions = [];
-  _actionsByClip = new Map;
-  _time = 0;
-  _listeners = new Map;
-  _device = null;
-  constructor(skeleton) {
-    this.skeleton = skeleton;
-  }
-  setDevice(device) {
-    this._device = device;
-    this.skeleton.initGPU(device);
-  }
-  clipAction(clip) {
-    let action = this._actionsByClip.get(clip);
-    if (!action) {
-      action = new AnimationAction(this, clip);
-      this._actionsByClip.set(clip, action);
-    }
-    return action;
-  }
-  existingAction(clip) {
-    return this._actionsByClip.get(clip) ?? null;
-  }
-  get actions() {
-    return this._actions.slice();
-  }
-  get time() {
-    return this._time;
-  }
-  update(deltaTime) {
-    this._time += deltaTime;
-    this.skeleton.copyBindPose();
-    let totalWeight = 0;
-    for (const action of this._actions) {
-      if (action.enabled && action.effectiveWeight > 0) {
-        totalWeight += action.effectiveWeight;
-      }
-    }
-    const finishedActions = [];
-    for (const action of this._actions) {
-      if (!action.enabled)
-        continue;
-      const finished = action._update(deltaTime, this._time);
-      if (action.effectiveWeight > 0) {
-        const normalizedWeight = totalWeight > 1 ? action.effectiveWeight / totalWeight : action.effectiveWeight;
-        const originalWeight = action.effectiveWeight;
-        action._effectiveWeight = normalizedWeight;
-        action._apply();
-        action._effectiveWeight = originalWeight;
-      }
-      if (finished) {
-        finishedActions.push(action);
-      }
-    }
-    this.skeleton.update();
-    if (this._device) {
-      this.skeleton.uploadToGPU(this._device);
-    }
-    for (const action of finishedActions) {
-      this._dispatchEvent({
-        type: "finished",
-        action,
-        direction: 1
-      });
-    }
-  }
-  stopAllAction() {
-    for (const action of this._actions) {
-      action.stop();
-    }
-    this._actions.length = 0;
-  }
-  setTimeScaleForAll(scale) {
-    for (const action of this._actions) {
-      action.timeScale = scale;
-    }
-  }
-  getActionByName(name) {
-    for (const [clip, action] of this._actionsByClip) {
-      if (clip.name === name) {
-        return action;
-      }
-    }
-    return null;
-  }
-  addEventListener(type, callback) {
-    let listeners = this._listeners.get(type);
-    if (!listeners) {
-      listeners = [];
-      this._listeners.set(type, listeners);
-    }
-    listeners.push(callback);
-  }
-  removeEventListener(type, callback) {
-    const listeners = this._listeners.get(type);
-    if (listeners) {
-      const index = listeners.indexOf(callback);
-      if (index !== -1) {
-        listeners.splice(index, 1);
-      }
-    }
-  }
-  isPlaying() {
-    return this._actions.some((action) => action.isRunning());
-  }
-  get activeActionCount() {
-    return this._actions.filter((action) => action.isRunning()).length;
-  }
-  _addAction(action) {
-    if (!this._actions.includes(action)) {
-      this._actions.push(action);
-    }
-  }
-  _removeAction(action) {
-    const index = this._actions.indexOf(action);
-    if (index !== -1) {
-      this._actions.splice(index, 1);
-    }
-  }
-  _dispatchEvent(event) {
-    const listeners = this._listeners.get(event.type);
-    if (listeners) {
-      for (const callback of listeners) {
-        callback(event);
-      }
-    }
-  }
-  dispose() {
-    this.stopAllAction();
-    this._actionsByClip.clear();
-    this._listeners.clear();
-    this._device = null;
-  }
-  toString() {
-    return `AnimationMixer(skeleton=${this.skeleton.boneCount} bones, ` + `actions=${this._actions.length}, active=${this.activeActionCount})`;
-  }
-}
-// ../../src/core/animation/SkinnedMesh.ts
-class SkinnedMesh extends Mesh {
-  skeleton = null;
-  bindMatrix = new Matrix4;
-  bindMatrixInverse = new Matrix4;
-  isSkinned = true;
-  jointsBuffer = null;
-  weightsBuffer = null;
-  constructor(geometry, material, skeleton) {
-    super(geometry, material);
-    this.name = "SkinnedMesh";
-    if (skeleton) {
-      this.bind(skeleton);
-    }
-  }
-  bind(skeleton, bindMatrix) {
-    this.skeleton = skeleton;
-    if (bindMatrix) {
-      this.bindMatrix.copy(bindMatrix);
-    } else {
-      this.bindMatrix.identity();
-    }
-    this.bindMatrixInverse.copy(this.bindMatrix).inverse();
-  }
-  initSkinningBuffers(device) {
-    const jointsData = this.geometry.attributes["joints"];
-    if (jointsData && !this.jointsBuffer) {
-      const jointsUint = new Uint32Array(jointsData.length);
-      for (let i = 0;i < jointsData.length; i++) {
-        jointsUint[i] = Math.floor(jointsData[i]);
-      }
-      this.jointsBuffer = device.createBuffer({
-        label: "SkinnedMesh Joints Buffer",
-        size: jointsUint.byteLength,
-        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-        mappedAtCreation: true
-      });
-      new Uint32Array(this.jointsBuffer.getMappedRange()).set(jointsUint);
-      this.jointsBuffer.unmap();
-    }
-    const weightsData = this.geometry.attributes["weights"];
-    if (weightsData && !this.weightsBuffer) {
-      this.weightsBuffer = device.createBuffer({
-        label: "SkinnedMesh Weights Buffer",
-        size: weightsData.byteLength,
-        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-        mappedAtCreation: true
-      });
-      new Float32Array(this.weightsBuffer.getMappedRange()).set(weightsData);
-      this.weightsBuffer.unmap();
-    }
-    if (this.skeleton) {
-      this.skeleton.initGPU(device);
-    }
-  }
-  hasSkinningData() {
-    return !!(this.geometry.attributes["joints"] && this.geometry.attributes["weights"] && this.skeleton);
-  }
-  get skinnedVertexCount() {
-    const joints = this.geometry.attributes["joints"];
-    return joints ? joints.length / 4 : 0;
-  }
-  prepareSkinning(device) {
-    if (!this.skeleton)
-      return;
-    if (!this.jointsBuffer || !this.weightsBuffer) {
-      this.initSkinningBuffers(device);
-    }
-    this.skeleton.uploadToGPU(device);
-  }
-  normalizeWeights() {
-    const weights = this.geometry.attributes["weights"];
-    if (!weights)
-      return;
-    const vertexCount = weights.length / 4;
-    for (let i = 0;i < vertexCount; i++) {
-      const offset = i * 4;
-      const w0 = weights[offset];
-      const w1 = weights[offset + 1];
-      const w2 = weights[offset + 2];
-      const w3 = weights[offset + 3];
-      const sum = w0 + w1 + w2 + w3;
-      if (sum > 0 && Math.abs(sum - 1) > 0.001) {
-        const invSum = 1 / sum;
-        weights[offset] = w0 * invSum;
-        weights[offset + 1] = w1 * invSum;
-        weights[offset + 2] = w2 * invSum;
-        weights[offset + 3] = w3 * invSum;
-      }
-    }
-    this.geometry.markBuffersDirty();
-    if (this.weightsBuffer) {
-      this.weightsBuffer.destroy();
-      this.weightsBuffer = null;
-    }
-  }
-  clone() {
-    const cloned = new SkinnedMesh(this.geometry, this.material, this.skeleton?.clone());
-    cloned.transform.position.copy(this.transform.position);
-    cloned.transform.rotation.copy(this.transform.rotation);
-    cloned.transform.scale.copy(this.transform.scale);
-    cloned.bindMatrix.copy(this.bindMatrix);
-    cloned.bindMatrixInverse.copy(this.bindMatrixInverse);
-    return cloned;
-  }
-  destroy() {
-    this.jointsBuffer?.destroy();
-    this.weightsBuffer?.destroy();
-    this.jointsBuffer = null;
-    this.weightsBuffer = null;
-  }
-  toString() {
-    return `SkinnedMesh("${this.name}", vertices=${this.geometry.vertexCount}, ` + `skeleton=${this.skeleton?.boneCount ?? 0} bones)`;
-  }
-}
-// ../../src/core/animation/skinning/SkinningShader.ts
-var SKINNING_UNIFORMS = `
-// Bone matrices storage buffer (bind group 2)
-@group(2) @binding(0) var<storage, read> boneMatrices: array<mat4x4<f32>, ${MAX_BONES}>;
-`;
-var SKINNING_RESULT = `
-struct SkinningResult {
-  position: vec3<f32>,
-  normal: vec3<f32>,
-}
-`;
-var APPLY_SKINNING_FUNCTION = `
-fn applySkinning(
-  position: vec3<f32>,
-  normal: vec3<f32>,
-  joints: vec4<u32>,
-  weights: vec4<f32>
-) -> SkinningResult {
-  var skinnedPosition = vec3<f32>(0.0);
-  var skinnedNormal = vec3<f32>(0.0);
-
-  // Apply up to 4 bone influences
-  // Unrolled for performance
-  let bone0 = boneMatrices[joints.x];
-  let bone1 = boneMatrices[joints.y];
-  let bone2 = boneMatrices[joints.z];
-  let bone3 = boneMatrices[joints.w];
-
-  let w0 = weights.x;
-  let w1 = weights.y;
-  let w2 = weights.z;
-  let w3 = weights.w;
-
-  // Position skinning
-  skinnedPosition += w0 * (bone0 * vec4<f32>(position, 1.0)).xyz;
-  skinnedPosition += w1 * (bone1 * vec4<f32>(position, 1.0)).xyz;
-  skinnedPosition += w2 * (bone2 * vec4<f32>(position, 1.0)).xyz;
-  skinnedPosition += w3 * (bone3 * vec4<f32>(position, 1.0)).xyz;
-
-  // Normal skinning (using 3x3 rotation part of matrix)
-  // For uniform scale, this is correct. For non-uniform scale, we'd need inverse transpose.
-  skinnedNormal += w0 * (bone0 * vec4<f32>(normal, 0.0)).xyz;
-  skinnedNormal += w1 * (bone1 * vec4<f32>(normal, 0.0)).xyz;
-  skinnedNormal += w2 * (bone2 * vec4<f32>(normal, 0.0)).xyz;
-  skinnedNormal += w3 * (bone3 * vec4<f32>(normal, 0.0)).xyz;
-
-  return SkinningResult(skinnedPosition, normalize(skinnedNormal));
-}
-`;
-function getSkinningShaderHeader() {
-  return `
-${SKINNING_UNIFORMS}
-${SKINNING_RESULT}
-${APPLY_SKINNING_FUNCTION}
-`;
-}
-function createSkinnedVertexShader(standardVertexShader) {
-  let modifiedShader = standardVertexShader;
-  const skinningHeader = getSkinningShaderHeader();
-  const vertexInputRegex = /struct VertexInput \{[^}]+\}/;
-  const skinnedVertexInput = `struct VertexInput {
-  @location(0) position: vec3<f32>,
-  @location(1) normal: vec3<f32>,
-  @location(2) uv: vec2<f32>,
-  @location(3) joints: vec4<u32>,
-  @location(4) weights: vec4<f32>,
-}`;
-  const vertexInputMatch = modifiedShader.match(vertexInputRegex);
-  console.log("SkinningShader: VertexInput match:", vertexInputMatch ? "found" : "NOT FOUND");
-  modifiedShader = modifiedShader.replace(vertexInputRegex, skinnedVertexInput);
-  const vsMainIndex = modifiedShader.indexOf("@vertex");
-  console.log("SkinningShader: @vertex found at index:", vsMainIndex);
-  if (vsMainIndex > -1) {
-    modifiedShader = modifiedShader.slice(0, vsMainIndex) + skinningHeader + `
-` + modifiedShader.slice(vsMainIndex);
-  }
-  const worldPosPattern = /let worldPos = modelMatrix \* vec4<f32>\(input\.position, 1\.0\);/g;
-  const worldPosMatch = modifiedShader.match(worldPosPattern);
-  console.log("SkinningShader: worldPos (input.position) pattern match:", worldPosMatch ? "found" : "NOT FOUND");
-  let skinnedDefined = false;
-  if (worldPosMatch) {
-    modifiedShader = modifiedShader.replace(worldPosPattern, `let skinned = applySkinning(input.position, input.normal, input.joints, input.weights);
-        let worldPos = modelMatrix * vec4<f32>(skinned.position, 1.0);`);
-    skinnedDefined = true;
-  }
-  const localPosPattern = /let worldPos = modelMatrix \* vec4<f32>\(localPos, 1\.0\);/g;
-  const localPosMatch = modifiedShader.match(localPosPattern);
-  console.log("SkinningShader: worldPos (localPos) pattern match:", localPosMatch ? "found" : "NOT FOUND");
-  if (localPosMatch) {
-    modifiedShader = modifiedShader.replace(/var localPos = input\.position;/g, `let skinned = applySkinning(input.position, input.normal, input.joints, input.weights);
-        var localPos = skinned.position;`);
-    skinnedDefined = true;
-  }
-  const normalPattern = /output\.worldNormal = \(normalMatrix \* vec4<f32>\(input\.normal, 0\.0\)\)\.xyz;/g;
-  const normalMatch = modifiedShader.match(normalPattern);
-  console.log("SkinningShader: normal pattern match:", normalMatch ? "found" : "NOT FOUND");
-  if (skinnedDefined) {
-    modifiedShader = modifiedShader.replace(normalPattern, "output.worldNormal = (normalMatrix * vec4<f32>(skinned.normal, 0.0)).xyz;");
-  }
-  if (skinnedDefined) {
-    const prevWorldPosPattern = /let prevWorldPos = prevModelMatrix \* vec4<f32>\(input\.position, 1\.0\);/g;
-    modifiedShader = modifiedShader.replace(prevWorldPosPattern, "let prevWorldPos = prevModelMatrix * vec4<f32>(skinned.position, 1.0);");
-  }
-  return modifiedShader;
-}
-// ../../src/core/animation/MorphTarget.ts
-var MAX_MORPH_TARGETS = 8;
-class MorphTargets {
-  targets = [];
-  weights;
-  vertexCount;
-  deltasBuffer = null;
-  weightsBuffer = null;
-  bindGroup = null;
-  weightsDirty = true;
-  constructor(vertexCount) {
-    this.vertexCount = vertexCount;
-    this.weights = new Float32Array(MAX_MORPH_TARGETS);
-  }
-  addTarget(target) {
-    if (this.targets.length >= MAX_MORPH_TARGETS) {
-      console.warn(`MorphTargets: Maximum of ${MAX_MORPH_TARGETS} morph targets exceeded. Ignoring target "${target.name}".`);
-      return;
-    }
-    const targetVertexCount = target.positionDeltas.length / 3;
-    if (targetVertexCount !== this.vertexCount) {
-      console.warn(`MorphTargets: Target "${target.name}" has ${targetVertexCount} vertices, expected ${this.vertexCount}`);
-    }
-    target.index = this.targets.length;
-    this.targets.push(target);
-  }
-  getTarget(name) {
-    return this.targets.find((t) => t.name === name) ?? null;
-  }
-  getTargetByIndex(index) {
-    return this.targets[index] ?? null;
-  }
-  setWeight(name, weight) {
-    const target = this.getTarget(name);
-    if (target) {
-      this.setWeightByIndex(target.index, weight);
-    }
-  }
-  setWeightByIndex(index, weight) {
-    if (index >= 0 && index < MAX_MORPH_TARGETS) {
-      const clampedWeight = Math.max(0, Math.min(1, weight));
-      if (this.weights[index] !== clampedWeight) {
-        this.weights[index] = clampedWeight;
-        this.weightsDirty = true;
-      }
-    }
-  }
-  setWeights(weights) {
-    for (let i = 0;i < Math.min(weights.length, MAX_MORPH_TARGETS); i++) {
-      this.weights[i] = Math.max(0, Math.min(1, weights[i]));
-    }
-    this.weightsDirty = true;
-  }
-  getWeight(index) {
-    return this.weights[index] ?? 0;
-  }
-  resetWeights() {
-    this.weights.fill(0);
-    this.weightsDirty = true;
-  }
-  get targetCount() {
-    return this.targets.length;
-  }
-  get isActive() {
-    for (let i = 0;i < this.targets.length; i++) {
-      if (this.weights[i] > 0.001) {
-        return true;
-      }
-    }
-    return false;
-  }
-  initGPU(device) {
-    if (this.targets.length === 0)
-      return;
-    const deltasPerTarget = this.vertexCount * 6;
-    const totalFloats = MAX_MORPH_TARGETS * deltasPerTarget;
-    const deltasData = new Float32Array(totalFloats);
-    for (let t = 0;t < this.targets.length; t++) {
-      const target = this.targets[t];
-      const targetOffset = t * deltasPerTarget;
-      for (let v = 0;v < this.vertexCount; v++) {
-        const srcPosOffset = v * 3;
-        const dstOffset = targetOffset + v * 6;
-        deltasData[dstOffset + 0] = target.positionDeltas[srcPosOffset + 0];
-        deltasData[dstOffset + 1] = target.positionDeltas[srcPosOffset + 1];
-        deltasData[dstOffset + 2] = target.positionDeltas[srcPosOffset + 2];
-        if (target.normalDeltas) {
-          deltasData[dstOffset + 3] = target.normalDeltas[srcPosOffset + 0];
-          deltasData[dstOffset + 4] = target.normalDeltas[srcPosOffset + 1];
-          deltasData[dstOffset + 5] = target.normalDeltas[srcPosOffset + 2];
-        }
-      }
-    }
-    this.deltasBuffer = device.createBuffer({
-      label: "MorphTarget Deltas Buffer",
-      size: deltasData.byteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-      mappedAtCreation: true
-    });
-    new Float32Array(this.deltasBuffer.getMappedRange()).set(deltasData);
-    this.deltasBuffer.unmap();
-    const weightsBufferSize = Math.ceil(MAX_MORPH_TARGETS / 4) * 16;
-    this.weightsBuffer = device.createBuffer({
-      label: "MorphTarget Weights Buffer",
-      size: weightsBufferSize,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
-    this.uploadWeights(device);
-  }
-  uploadWeights(device) {
-    if (!this.weightsBuffer || !this.weightsDirty)
-      return;
-    const paddedWeights = new Float32Array(Math.ceil(MAX_MORPH_TARGETS / 4) * 4);
-    paddedWeights.set(this.weights);
-    device.queue.writeBuffer(this.weightsBuffer, 0, paddedWeights);
-    this.weightsDirty = false;
-  }
-  static createBindGroupLayout(device) {
-    return device.createBindGroupLayout({
-      label: "MorphTarget BindGroup Layout",
-      entries: [
-        {
-          binding: 0,
-          visibility: GPUShaderStage.VERTEX,
-          buffer: { type: "read-only-storage" }
-        },
-        {
-          binding: 1,
-          visibility: GPUShaderStage.VERTEX,
-          buffer: { type: "uniform" }
-        }
-      ]
-    });
-  }
-  createBindGroup(device, layout) {
-    if (!this.deltasBuffer || !this.weightsBuffer) {
-      console.warn("MorphTargets: Cannot create bind group - buffers not initialized");
-      return;
-    }
-    this.bindGroup = device.createBindGroup({
-      label: "MorphTarget BindGroup",
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: this.deltasBuffer } },
-        { binding: 1, resource: { buffer: this.weightsBuffer } }
-      ]
-    });
-  }
-  prepare(device) {
-    if (this.weightsDirty && this.weightsBuffer) {
-      this.uploadWeights(device);
-    }
-  }
-  destroy() {
-    this.deltasBuffer?.destroy();
-    this.weightsBuffer?.destroy();
-    this.deltasBuffer = null;
-    this.weightsBuffer = null;
-    this.bindGroup = null;
-  }
-  clone() {
-    const cloned = new MorphTargets(this.vertexCount);
-    for (const target of this.targets) {
-      cloned.targets.push(target);
-    }
-    cloned.weights.set(this.weights);
-    cloned.weightsDirty = true;
-    return cloned;
-  }
-  toString() {
-    const activeTargets = this.targets.filter((_, i) => this.weights[i] > 0.001);
-    return `MorphTargets(${this.targets.length} targets, ${activeTargets.length} active)`;
-  }
-}
-// ../../src/core/animation/MorphTargetMesh.ts
-class MorphTargetMesh extends Mesh {
-  morphTargets;
-  hasMorphTargets = true;
-  morphGPUInitialized = false;
-  constructor(geometry, material, morphTargets) {
-    super(geometry, material);
-    this.name = "MorphTargetMesh";
-    if (morphTargets) {
-      this.morphTargets = morphTargets;
-    } else {
-      this.morphTargets = new MorphTargets(geometry.vertexCount);
-    }
-  }
-  addMorphTarget(target) {
-    this.morphTargets.addTarget(target);
-    this.morphGPUInitialized = false;
-  }
-  setMorphWeight(name, weight) {
-    this.morphTargets.setWeight(name, weight);
-  }
-  setMorphWeightByIndex(index, weight) {
-    this.morphTargets.setWeightByIndex(index, weight);
-  }
-  setMorphWeights(weights) {
-    this.morphTargets.setWeights(weights);
-  }
-  getMorphWeight(index) {
-    return this.morphTargets.getWeight(index);
-  }
-  resetMorphWeights() {
-    this.morphTargets.resetWeights();
-  }
-  get morphTargetCount() {
-    return this.morphTargets.targetCount;
-  }
-  get morphTargetNames() {
-    return this.morphTargets.targets.map((t) => t.name);
-  }
-  get isMorphActive() {
-    return this.morphTargets.isActive;
-  }
-  initMorphGPU(device) {
-    if (this.morphGPUInitialized)
-      return;
-    this.morphTargets.initGPU(device);
-    this.morphGPUInitialized = true;
-    console.log(`MorphTargetMesh: Initialized GPU for "${this.name}" with ${this.morphTargets.targetCount} targets`);
-  }
-  createMorphBindGroup(device, layout) {
-    if (!this.morphGPUInitialized) {
-      this.initMorphGPU(device);
-    }
-    this.morphTargets.createBindGroup(device, layout);
-  }
-  prepareMorph(device) {
-    if (!this.morphGPUInitialized) {
-      this.initMorphGPU(device);
-    }
-    this.morphTargets.prepare(device);
-  }
-  clone() {
-    const cloned = new MorphTargetMesh(this.geometry, this.material, this.morphTargets.clone());
-    cloned.transform.position.copy(this.transform.position);
-    cloned.transform.rotation.copy(this.transform.rotation);
-    cloned.transform.scale.copy(this.transform.scale);
-    return cloned;
-  }
-  destroy() {
-    this.morphTargets.destroy();
-  }
-  toString() {
-    return `MorphTargetMesh("${this.name}", vertices=${this.geometry.vertexCount}, ` + `morphTargets=${this.morphTargets.targetCount})`;
-  }
-}
-// ../../src/core/animation/morphing/MorphTargetShader.ts
-var MORPH_TARGET_UNIFORMS = `
-// Morph target deltas storage buffer (bind group 2 or 3 depending on skinning)
-// Layout: For each target, vertexCount * (3 floats position + 3 floats normal)
-@group(2) @binding(0) var<storage, read> morphDeltas: array<f32>;
-
-// Morph weights uniform buffer
-// Layout: vec4 * ceil(MAX_MORPH_TARGETS / 4)
-@group(2) @binding(1) var<uniform> morphWeights: array<vec4<f32>, ${Math.ceil(MAX_MORPH_TARGETS / 4)}>;
-
-// Constants
-const MAX_MORPH_TARGETS: u32 = ${MAX_MORPH_TARGETS}u;
-`;
-var MORPH_RESULT = `
-struct MorphResult {
-  position: vec3<f32>,
-  normal: vec3<f32>,
-}
-`;
-var APPLY_MORPH_FUNCTION = `
-fn applyMorphTargets(
-  vertexIndex: u32,
-  basePosition: vec3<f32>,
-  baseNormal: vec3<f32>,
-  vertexCount: u32,
-  targetCount: u32
-) -> MorphResult {
-  var morphedPosition = basePosition;
-  var morphedNormal = baseNormal;
-
-  // Each target stores vertexCount * 6 floats (pos.xyz + normal.xyz per vertex)
-  let deltasPerTarget = vertexCount * 6u;
-
-  // Apply each morph target
-  for (var t = 0u; t < targetCount && t < MAX_MORPH_TARGETS; t++) {
-    // Get weight for this target
-    let weightIndex = t / 4u;
-    let weightComponent = t % 4u;
-    var weight: f32;
-    switch (weightComponent) {
-      case 0u: { weight = morphWeights[weightIndex].x; }
-      case 1u: { weight = morphWeights[weightIndex].y; }
-      case 2u: { weight = morphWeights[weightIndex].z; }
-      default: { weight = morphWeights[weightIndex].w; }
-    }
-
-    // Skip if weight is negligible
-    if (weight < 0.001) {
-      continue;
-    }
-
-    // Calculate offset into deltas buffer for this target and vertex
-    let targetOffset = t * deltasPerTarget;
-    let vertexOffset = targetOffset + vertexIndex * 6u;
-
-    // Read position delta
-    let positionDelta = vec3<f32>(
-      morphDeltas[vertexOffset + 0u],
-      morphDeltas[vertexOffset + 1u],
-      morphDeltas[vertexOffset + 2u]
-    );
-
-    // Read normal delta
-    let normalDelta = vec3<f32>(
-      morphDeltas[vertexOffset + 3u],
-      morphDeltas[vertexOffset + 4u],
-      morphDeltas[vertexOffset + 5u]
-    );
-
-    // Apply weighted deltas
-    morphedPosition += weight * positionDelta;
-    morphedNormal += weight * normalDelta;
-  }
-
-  // Normalize the final normal
-  return MorphResult(morphedPosition, normalize(morphedNormal));
-}
-`;
-function getOptimizedMorphFunction(targetCount) {
-  if (targetCount <= 0)
-    return "";
-  let code = `
-fn applyMorphTargetsOptimized(
-  vertexIndex: u32,
-  basePosition: vec3<f32>,
-  baseNormal: vec3<f32>,
-  vertexCount: u32
-) -> MorphResult {
-  var morphedPosition = basePosition;
-  var morphedNormal = baseNormal;
-  let deltasPerTarget = vertexCount * 6u;
-`;
-  for (let t = 0;t < Math.min(targetCount, MAX_MORPH_TARGETS); t++) {
-    const weightIndex = Math.floor(t / 4);
-    const component = ["x", "y", "z", "w"][t % 4];
-    code += `
-  // Target ${t}
-  {
-    let weight = morphWeights[${weightIndex}].${component};
-    if (weight > 0.001) {
-      let vertexOffset = ${t}u * deltasPerTarget + vertexIndex * 6u;
-      morphedPosition += weight * vec3<f32>(
-        morphDeltas[vertexOffset],
-        morphDeltas[vertexOffset + 1u],
-        morphDeltas[vertexOffset + 2u]
-      );
-      morphedNormal += weight * vec3<f32>(
-        morphDeltas[vertexOffset + 3u],
-        morphDeltas[vertexOffset + 4u],
-        morphDeltas[vertexOffset + 5u]
-      );
-    }
-  }`;
-  }
-  code += `
-  return MorphResult(morphedPosition, normalize(morphedNormal));
-}
-`;
-  return code;
-}
-function getMorphTargetShaderHeader() {
-  return `
-${MORPH_TARGET_UNIFORMS}
-${MORPH_RESULT}
-${APPLY_MORPH_FUNCTION}
-`;
-}
-function createMorphedVertexShader(standardVertexShader, targetCount = MAX_MORPH_TARGETS) {
-  let modifiedShader = standardVertexShader;
-  const morphHeader = getMorphTargetShaderHeader();
-  const optimizedMorphFn = targetCount > 0 && targetCount <= 8 ? getOptimizedMorphFunction(targetCount) : "";
-  const vsMainIndex = modifiedShader.indexOf("@vertex");
-  if (vsMainIndex > -1) {
-    modifiedShader = modifiedShader.slice(0, vsMainIndex) + morphHeader + `
-` + optimizedMorphFn + `
-` + modifiedShader.slice(vsMainIndex);
-  }
-  const vsMainFnRegex = /fn vs_main\(input\s*:\s*VertexInput,\s*@builtin\(instance_index\)\s*instanceIndex\s*:\s*u32\)/;
-  modifiedShader = modifiedShader.replace(vsMainFnRegex, "fn vs_main(input: VertexInput, @builtin(instance_index) instanceIndex: u32, @builtin(vertex_index) vertexIndex: u32)");
-  const morphConfigUniform = `
-// Morph configuration: x = vertexCount, y = targetCount
-var<private> morphConfig: vec2<u32>;
-`;
-  const morphHeaderEndIndex = modifiedShader.indexOf(APPLY_MORPH_FUNCTION) + APPLY_MORPH_FUNCTION.length;
-  if (morphHeaderEndIndex > APPLY_MORPH_FUNCTION.length) {
-    modifiedShader = modifiedShader.slice(0, morphHeaderEndIndex) + morphConfigUniform + modifiedShader.slice(morphHeaderEndIndex);
-  }
-  const worldPosPattern = /let worldPos = modelMatrix \* vec4<f32>\(input\.position, 1\.0\);/g;
-  const worldPosMatch = modifiedShader.match(worldPosPattern);
-  let morphedDefined = false;
-  if (worldPosMatch) {
-    modifiedShader = modifiedShader.replace(worldPosPattern, `// Apply morph targets
-        let morphed = applyMorphTargets(vertexIndex, input.position, input.normal, ${targetCount}u, ${targetCount}u);
-        let worldPos = modelMatrix * vec4<f32>(morphed.position, 1.0);`);
-    morphedDefined = true;
-  }
-  const localPosPattern = /let worldPos = modelMatrix \* vec4<f32>\(localPos, 1\.0\);/g;
-  const localPosMatch = modifiedShader.match(localPosPattern);
-  if (localPosMatch) {
-    modifiedShader = modifiedShader.replace(/var localPos = input\.position;/g, `let morphed = applyMorphTargets(vertexIndex, input.position, input.normal, ${targetCount}u, ${targetCount}u);
-        var localPos = morphed.position;`);
-    morphedDefined = true;
-  }
-  if (morphedDefined) {
-    const normalPattern = /output\.worldNormal = \(normalMatrix \* vec4<f32>\(input\.normal, 0\.0\)\)\.xyz;/g;
-    modifiedShader = modifiedShader.replace(normalPattern, "output.worldNormal = (normalMatrix * vec4<f32>(morphed.normal, 0.0)).xyz;");
-    const prevWorldPosPattern = /let prevWorldPos = prevModelMatrix \* vec4<f32>\(input\.position, 1\.0\);/g;
-    modifiedShader = modifiedShader.replace(prevWorldPosPattern, "let prevWorldPos = prevModelMatrix * vec4<f32>(morphed.position, 1.0);");
-  }
-  return modifiedShader;
-}
-// ../../src/core/animation/Easing.ts
-var linear = (t) => t;
-var easeInQuad = (t) => t * t;
-var easeOutQuad = (t) => 1 - (1 - t) * (1 - t);
-var easeInOutQuad = (t) => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-var easeInCubic = (t) => t * t * t;
-var easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
-var easeInOutCubic = (t) => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-var easeInQuart = (t) => t * t * t * t;
-var easeOutQuart = (t) => 1 - Math.pow(1 - t, 4);
-var easeInOutQuart = (t) => t < 0.5 ? 8 * t * t * t * t : 1 - Math.pow(-2 * t + 2, 4) / 2;
-var easeInQuint = (t) => t * t * t * t * t;
-var easeOutQuint = (t) => 1 - Math.pow(1 - t, 5);
-var easeInOutQuint = (t) => t < 0.5 ? 16 * t * t * t * t * t : 1 - Math.pow(-2 * t + 2, 5) / 2;
-var easeInSine = (t) => 1 - Math.cos(t * Math.PI / 2);
-var easeOutSine = (t) => Math.sin(t * Math.PI / 2);
-var easeInOutSine = (t) => -(Math.cos(Math.PI * t) - 1) / 2;
-var easeInExpo = (t) => t === 0 ? 0 : Math.pow(2, 10 * t - 10);
-var easeOutExpo = (t) => t === 1 ? 1 : 1 - Math.pow(2, -10 * t);
-var easeInOutExpo = (t) => t === 0 ? 0 : t === 1 ? 1 : t < 0.5 ? Math.pow(2, 20 * t - 10) / 2 : (2 - Math.pow(2, -20 * t + 10)) / 2;
-var easeInCirc = (t) => 1 - Math.sqrt(1 - Math.pow(t, 2));
-var easeOutCirc = (t) => Math.sqrt(1 - Math.pow(t - 1, 2));
-var easeInOutCirc = (t) => t < 0.5 ? (1 - Math.sqrt(1 - Math.pow(2 * t, 2))) / 2 : (Math.sqrt(1 - Math.pow(-2 * t + 2, 2)) + 1) / 2;
-var c4 = 2 * Math.PI / 3;
-var c5 = 2 * Math.PI / 4.5;
-var easeInElastic = (t) => t === 0 ? 0 : t === 1 ? 1 : -Math.pow(2, 10 * t - 10) * Math.sin((t * 10 - 10.75) * c4);
-var easeOutElastic = (t) => t === 0 ? 0 : t === 1 ? 1 : Math.pow(2, -10 * t) * Math.sin((t * 10 - 0.75) * c4) + 1;
-var easeInOutElastic = (t) => t === 0 ? 0 : t === 1 ? 1 : t < 0.5 ? -(Math.pow(2, 20 * t - 10) * Math.sin((20 * t - 11.125) * c5)) / 2 : Math.pow(2, -20 * t + 10) * Math.sin((20 * t - 11.125) * c5) / 2 + 1;
-var c1 = 1.70158;
-var c2 = c1 * 1.525;
-var c3 = c1 + 1;
-var easeInBack = (t) => c3 * t * t * t - c1 * t * t;
-var easeOutBack = (t) => 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
-var easeInOutBack = (t) => t < 0.5 ? Math.pow(2 * t, 2) * ((c2 + 1) * 2 * t - c2) / 2 : (Math.pow(2 * t - 2, 2) * ((c2 + 1) * (t * 2 - 2) + c2) + 2) / 2;
-var n1 = 7.5625;
-var d1 = 2.75;
-var easeOutBounce = (t) => {
-  if (t < 1 / d1) {
-    return n1 * t * t;
-  } else if (t < 2 / d1) {
-    return n1 * (t -= 1.5 / d1) * t + 0.75;
-  } else if (t < 2.5 / d1) {
-    return n1 * (t -= 2.25 / d1) * t + 0.9375;
-  } else {
-    return n1 * (t -= 2.625 / d1) * t + 0.984375;
-  }
-};
-var easeInBounce = (t) => 1 - easeOutBounce(1 - t);
-var easeInOutBounce = (t) => t < 0.5 ? (1 - easeOutBounce(1 - 2 * t)) / 2 : (1 + easeOutBounce(2 * t - 1)) / 2;
-var Easing = {
-  linear,
-  easeInQuad,
-  easeOutQuad,
-  easeInOutQuad,
-  easeInCubic,
-  easeOutCubic,
-  easeInOutCubic,
-  easeInQuart,
-  easeOutQuart,
-  easeInOutQuart,
-  easeInQuint,
-  easeOutQuint,
-  easeInOutQuint,
-  easeInSine,
-  easeOutSine,
-  easeInOutSine,
-  easeInExpo,
-  easeOutExpo,
-  easeInOutExpo,
-  easeInCirc,
-  easeOutCirc,
-  easeInOutCirc,
-  easeInElastic,
-  easeOutElastic,
-  easeInOutElastic,
-  easeInBack,
-  easeOutBack,
-  easeInOutBack,
-  easeInBounce,
-  easeOutBounce,
-  easeInOutBounce
-};
-function getEasing(name) {
-  if (typeof name === "function") {
-    return name;
-  }
-  return Easing[name] ?? linear;
-}
-// ../../src/core/animation/Tween.ts
-function isVector2(value) {
-  return value instanceof Vector2 || typeof value === "object" && value !== null && "x" in value && "y" in value && !("z" in value);
-}
-function isVector3(value) {
-  return value instanceof Vector3 || typeof value === "object" && value !== null && "x" in value && "y" in value && "z" in value;
-}
-function isColor(value) {
-  return typeof value === "object" && value !== null && "r" in value && "g" in value && "b" in value;
-}
-function interpolate(start, end, t) {
-  if (typeof start === "number" && typeof end === "number") {
-    return start + (end - start) * t;
-  }
-  if (isVector3(start) && isVector3(end)) {
-    return new Vector3(start.x + (end.x - start.x) * t, start.y + (end.y - start.y) * t, start.z + (end.z - start.z) * t);
-  }
-  if (isVector2(start) && isVector2(end)) {
-    return new Vector2(start.x + (end.x - start.x) * t, start.y + (end.y - start.y) * t);
-  }
-  if (isColor(start) && isColor(end)) {
-    return {
-      r: start.r + (end.r - start.r) * t,
-      g: start.g + (end.g - start.g) * t,
-      b: start.b + (end.b - start.b) * t,
-      a: (start.a ?? 1) + ((end.a ?? 1) - (start.a ?? 1)) * t
-    };
-  }
-  return start;
-}
-function cloneValue(value) {
-  if (typeof value === "number") {
-    return value;
-  }
-  if (isVector3(value)) {
-    return new Vector3(value.x, value.y, value.z);
-  }
-  if (isVector2(value)) {
-    return new Vector2(value.x, value.y);
-  }
-  if (isColor(value)) {
-    return { r: value.r, g: value.g, b: value.b, a: value.a };
-  }
-  return value;
-}
-function applyValue(target, key, value) {
-  const obj = target;
-  const existing = obj[key];
-  if (typeof value === "number") {
-    obj[key] = value;
-  } else if (isVector3(value) && isVector3(existing)) {
-    existing.x = value.x;
-    existing.y = value.y;
-    existing.z = value.z;
-  } else if (isVector2(value) && isVector2(existing)) {
-    existing.x = value.x;
-    existing.y = value.y;
-  } else if (isColor(value) && isColor(existing)) {
-    existing.r = value.r;
-    existing.g = value.g;
-    existing.b = value.b;
-    if (value.a !== undefined) {
-      existing.a = value.a;
-    }
-  } else {
-    obj[key] = value;
-  }
-}
-
-class Tween {
-  target;
-  startValues = new Map;
-  endValues = new Map;
-  _state = "idle";
-  _elapsed = 0;
-  _delayElapsed = 0;
-  _repeatCount = 0;
-  _reversed = false;
-  _started = false;
-  duration = 1;
-  delay = 0;
-  easing = linear;
-  repeat = 0;
-  repeatDelay = 0;
-  yoyo = false;
-  onStartCallback;
-  onUpdateCallback;
-  onCompleteCallback;
-  onRepeatCallback;
-  onStopCallback;
-  chainedTween;
-  _manager;
-  constructor(target, options) {
-    this.target = target;
-    if (options) {
-      this.configure(options);
-    }
-  }
-  configure(options) {
-    if (options.duration !== undefined)
-      this.duration = options.duration;
-    if (options.delay !== undefined)
-      this.delay = options.delay;
-    if (options.easing !== undefined)
-      this.easing = getEasing(options.easing);
-    if (options.repeat !== undefined)
-      this.repeat = options.repeat;
-    if (options.repeatDelay !== undefined)
-      this.repeatDelay = options.repeatDelay;
-    if (options.yoyo !== undefined)
-      this.yoyo = options.yoyo;
-    if (options.onStart !== undefined)
-      this.onStartCallback = options.onStart;
-    if (options.onUpdate !== undefined)
-      this.onUpdateCallback = options.onUpdate;
-    if (options.onComplete !== undefined)
-      this.onCompleteCallback = options.onComplete;
-    if (options.onRepeat !== undefined)
-      this.onRepeatCallback = options.onRepeat;
-    if (options.onStop !== undefined)
-      this.onStopCallback = options.onStop;
-    return this;
-  }
-  to(values, duration) {
-    if (duration !== undefined) {
-      this.duration = duration;
-    }
-    for (const key of Object.keys(values)) {
-      const targetValue = this.target[key];
-      const endValue = values[key];
-      if (targetValue !== undefined && endValue !== undefined) {
-        this.startValues.set(key, cloneValue(targetValue));
-        this.endValues.set(key, cloneValue(endValue));
-      }
-    }
-    return this;
-  }
-  from(values) {
-    for (const key of Object.keys(values)) {
-      const value = values[key];
-      if (value !== undefined) {
-        this.startValues.set(key, cloneValue(value));
-      }
-    }
-    return this;
-  }
-  setDuration(duration) {
-    this.duration = duration;
-    return this;
-  }
-  setDelay(delay) {
-    this.delay = delay;
-    return this;
-  }
-  setEasing(easing) {
-    this.easing = getEasing(easing);
-    return this;
-  }
-  setRepeat(count) {
-    this.repeat = count;
-    return this;
-  }
-  setRepeatDelay(delay) {
-    this.repeatDelay = delay;
-    return this;
-  }
-  setYoyo(enabled) {
-    this.yoyo = enabled;
-    return this;
-  }
-  onStart(callback) {
-    this.onStartCallback = callback;
-    return this;
-  }
-  onUpdate(callback) {
-    this.onUpdateCallback = callback;
-    return this;
-  }
-  onComplete(callback) {
-    this.onCompleteCallback = callback;
-    return this;
-  }
-  onRepeat(callback) {
-    this.onRepeatCallback = callback;
-    return this;
-  }
-  onStop(callback) {
-    this.onStopCallback = callback;
-    return this;
-  }
-  chain(tween) {
-    this.chainedTween = tween;
-    return tween;
-  }
-  start() {
-    if (this._state === "running")
-      return this;
-    this._state = "running";
-    this._elapsed = 0;
-    this._delayElapsed = 0;
-    this._repeatCount = 0;
-    this._reversed = false;
-    this._started = false;
-    for (const key of this.endValues.keys()) {
-      if (!this.startValues.has(key)) {
-        const currentValue = this.target[key];
-        if (currentValue !== undefined) {
-          this.startValues.set(key, cloneValue(currentValue));
-        }
-      }
-    }
-    return this;
-  }
-  stop() {
-    if (this._state !== "running" && this._state !== "paused")
-      return this;
-    this._state = "completed";
-    this.onStopCallback?.();
-    if (this._manager) {
-      this._manager.remove(this);
-    }
-    return this;
-  }
-  pause() {
-    if (this._state === "running") {
-      this._state = "paused";
-    }
-    return this;
-  }
-  resume() {
-    if (this._state === "paused") {
-      this._state = "running";
-    }
-    return this;
-  }
-  reset() {
-    this._state = "idle";
-    this._elapsed = 0;
-    this._delayElapsed = 0;
-    this._repeatCount = 0;
-    this._reversed = false;
-    this._started = false;
-    for (const [key, startValue] of this.startValues) {
-      applyValue(this.target, key, startValue);
-    }
-    return this;
-  }
-  get state() {
-    return this._state;
-  }
-  get progress() {
-    if (this.duration === 0)
-      return 1;
-    return Math.min(this._elapsed / this.duration, 1);
-  }
-  get elapsed() {
-    return this._elapsed;
-  }
-  get isRunning() {
-    return this._state === "running";
-  }
-  get isComplete() {
-    return this._state === "completed";
-  }
-  setManager(manager) {
-    this._manager = manager;
-  }
-  getTarget() {
-    return this.target;
-  }
-  update(dt) {
-    if (this._state !== "running") {
-      return this._state !== "completed";
-    }
-    if (this._delayElapsed < this.delay) {
-      this._delayElapsed += dt;
-      if (this._delayElapsed < this.delay) {
-        return true;
-      }
-      dt = this._delayElapsed - this.delay;
-    }
-    if (!this._started) {
-      this._started = true;
-      this.onStartCallback?.();
-    }
-    this._elapsed += dt;
-    let progress = this.duration > 0 ? Math.min(this._elapsed / this.duration, 1) : 1;
-    if (this._reversed) {
-      progress = 1 - progress;
-    }
-    const easedProgress = this.easing(progress);
-    for (const [key, startValue] of this.startValues) {
-      const endValue = this.endValues.get(key);
-      if (endValue !== undefined) {
-        const value = interpolate(startValue, endValue, easedProgress);
-        applyValue(this.target, key, value);
-      }
-    }
-    this.onUpdateCallback?.(this._reversed ? 1 - progress : progress);
-    if (this._elapsed >= this.duration) {
-      if (this.repeat === -1 || this._repeatCount < this.repeat) {
-        this._repeatCount++;
-        this._elapsed = 0;
-        if (this.yoyo) {
-          this._reversed = !this._reversed;
-        }
-        if (this.repeatDelay > 0) {
-          this._delayElapsed = this.delay - this.repeatDelay;
-        }
-        this.onRepeatCallback?.(this._repeatCount);
-        return true;
-      }
-      this._state = "completed";
-      this.onCompleteCallback?.();
-      if (this.chainedTween) {
-        this.chainedTween.start();
-      }
-      return false;
-    }
-    return true;
-  }
-}
-// ../../src/core/animation/TweenManager.ts
-class TweenManager {
-  tweens = new Set;
-  static _instance = null;
-  static get instance() {
-    if (!TweenManager._instance) {
-      TweenManager._instance = new TweenManager;
-    }
-    return TweenManager._instance;
-  }
-  create(target, options) {
-    const tween = new Tween(target, options);
-    tween.setManager(this);
-    this.tweens.add(tween);
-    return tween;
-  }
-  add(tween) {
-    tween.setManager(this);
-    this.tweens.add(tween);
-    return this;
-  }
-  remove(tween) {
-    this.tweens.delete(tween);
-    return this;
-  }
-  update(dt) {
-    for (const tween of this.tweens) {
-      const shouldContinue = tween.update(dt);
-      if (!shouldContinue) {
-        this.tweens.delete(tween);
-      }
-    }
-  }
-  stopAll() {
-    for (const tween of this.tweens) {
-      tween.stop();
-    }
-    this.tweens.clear();
-  }
-  pauseAll() {
-    for (const tween of this.tweens) {
-      tween.pause();
-    }
-  }
-  resumeAll() {
-    for (const tween of this.tweens) {
-      tween.resume();
-    }
-  }
-  getTweensForTarget(target) {
-    const result = [];
-    for (const tween of this.tweens) {
-      if (tween.getTarget() === target) {
-        result.push(tween);
-      }
-    }
-    return result;
-  }
-  stopTweensForTarget(target) {
-    const tweens = this.getTweensForTarget(target);
-    for (const tween of tweens) {
-      tween.stop();
-      this.tweens.delete(tween);
-    }
-  }
-  get count() {
-    return this.tweens.size;
-  }
-  get hasActiveTweens() {
-    return this.tweens.size > 0;
-  }
-  clear() {
-    this.tweens.clear();
-  }
-}
 // ../../src/core/renderer/GeometryPass.ts
 class GeometryPass {
   gBuffer;
@@ -20593,7 +21079,8 @@ class GeometryPass {
       const isDeferredMaterial = node instanceof Mesh && (node.material instanceof StandardMaterial || node.material instanceof TerrainMaterial);
       if (isDeferredMaterial) {
         const material = node.material;
-        if (material.getRenderingPath() === "deferred") {
+        const isSkinnedMesh = node instanceof SkinnedMesh;
+        if (isSkinnedMesh || material.getRenderingPath() === "deferred") {
           if (useFrustumCulling) {
             const bounds = node.worldBounds;
             if (!this.frustum.intersectsBox(bounds.min.x, bounds.min.y, bounds.min.z, bounds.max.x, bounds.max.y, bounds.max.z)) {
@@ -26657,6 +27144,8 @@ class SSGIPass {
   temporalBindGroupLayout = null;
   sampler = null;
   depthSampler = null;
+  traceParamsBuffer = null;
+  temporalParamsBuffer = null;
   gBuffer;
   denoisePass;
   historyIndex = 0;
@@ -26678,6 +27167,16 @@ class SSGIPass {
       mipmapFilter: "nearest",
       addressModeU: "clamp-to-edge",
       addressModeV: "clamp-to-edge"
+    });
+    this.traceParamsBuffer = device.createBuffer({
+      label: "SSGI Trace Params",
+      size: 32,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    this.temporalParamsBuffer = device.createBuffer({
+      label: "SSGI Temporal Params",
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
     this.createBindGroupLayouts(device);
     this.denoisePass.init(device, context, presentationFormat);
@@ -26736,13 +27235,7 @@ class SSGIPass {
       this.fallbackAmbient[2],
       0
     ]);
-    const paramsBuffer = this.device.createBuffer({
-      size: 32,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-      mappedAtCreation: true
-    });
-    new Float32Array(paramsBuffer.getMappedRange()).set(paramsData);
-    paramsBuffer.unmap();
+    this.device.queue.writeBuffer(this.traceParamsBuffer, 0, paramsData);
     const sourceView = this.previousFrameTexture ? this.previousFrameTexture.createView() : this.gBuffer.albedoTexture.createView();
     const defaultEnv = CubeTexture.getDefault(this.device);
     const envMap = globalResources.environmentMap || defaultEnv;
@@ -26755,7 +27248,7 @@ class SSGIPass {
         { binding: 2, resource: sourceView },
         { binding: 3, resource: this.sampler },
         { binding: 4, resource: { buffer: sceneUniformBuffer } },
-        { binding: 5, resource: { buffer: paramsBuffer } },
+        { binding: 5, resource: { buffer: this.traceParamsBuffer } },
         { binding: 6, resource: this.gBuffer.albedoTexture.createView() },
         { binding: 7, resource: this.depthSampler },
         { binding: 8, resource: envMap.view },
@@ -26790,13 +27283,7 @@ class SSGIPass {
       0,
       0
     ]);
-    const paramsBuffer = this.device.createBuffer({
-      size: 16,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-      mappedAtCreation: true
-    });
-    new Float32Array(paramsBuffer.getMappedRange()).set(paramsData);
-    paramsBuffer.unmap();
+    this.device.queue.writeBuffer(this.temporalParamsBuffer, 0, paramsData);
     const bindGroup = this.device.createBindGroup({
       layout: this.temporalBindGroupLayout,
       entries: [
@@ -26805,7 +27292,7 @@ class SSGIPass {
         { binding: 2, resource: this.gBuffer.velocityTexture.createView() },
         { binding: 3, resource: this.gBuffer.normalTexture.createView() },
         { binding: 4, resource: this.sampler },
-        { binding: 5, resource: { buffer: paramsBuffer } }
+        { binding: 5, resource: { buffer: this.temporalParamsBuffer } }
       ]
     });
     const pass = commandEncoder.beginRenderPass({
@@ -27182,6 +27669,7 @@ class TAAPass {
   historyIndex = 0;
   pipeline = null;
   bindGroupLayout = null;
+  sampler = null;
   width = 0;
   height = 0;
   device = null;
@@ -27192,6 +27680,12 @@ class TAAPass {
   }
   init(device, context, presentationFormat) {
     this.device = device;
+    this.sampler = device.createSampler({
+      magFilter: "linear",
+      minFilter: "linear",
+      addressModeU: "clamp-to-edge",
+      addressModeV: "clamp-to-edge"
+    });
     this.resize(this.gBuffer.width, this.gBuffer.height);
   }
   resize(width, height) {
@@ -27238,7 +27732,7 @@ class TAAPass {
         { binding: 0, resource: source.createView() },
         { binding: 1, resource: historyRead.createView() },
         { binding: 2, resource: this.gBuffer.velocityTexture.createView() },
-        { binding: 3, resource: this.device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }) }
+        { binding: 3, resource: this.sampler }
       ]
     });
     const passDescriptor = {
@@ -27734,17 +28228,23 @@ class ToneMappingPass {
   godRaysTexture = null;
   context = null;
   defaultTexture = null;
+  sampler = null;
+  uniformBuffer = null;
+  bindGroup = null;
   bloomIntensity = 0.5;
   godRaysIntensity = 1;
   constructor() {}
   setInputTexture(texture) {
     this.inputTexture = texture;
+    this.bindGroup = null;
   }
   setBloomTexture(texture) {
     this.bloomTexture = texture;
+    this.bindGroup = null;
   }
   setGodRaysTexture(texture) {
     this.godRaysTexture = texture;
+    this.bindGroup = null;
   }
   init(device, context, presentationFormat) {
     this.context = context;
@@ -27755,6 +28255,12 @@ class ToneMappingPass {
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
     });
     device.queue.writeTexture({ texture: this.defaultTexture }, new Float32Array([0, 0, 0, 0]), { bytesPerRow: 16 }, { width: 1, height: 1 });
+    this.sampler = device.createSampler({ minFilter: "linear", magFilter: "linear" });
+    this.uniformBuffer = device.createBuffer({
+      label: "ToneMapping Uniform Buffer",
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
     this.createPipeline(device, presentationFormat);
   }
   resize(width, height) {}
@@ -27770,31 +28276,24 @@ class ToneMappingPass {
       return;
     }
     const textureView = currentTexture.createView();
-    let bloomView;
-    if (this.bloomTexture && this.bloomTexture.width > 0 && this.bloomTexture.height > 0) {
-      bloomView = this.bloomTexture.createView();
-    } else {
-      bloomView = this.defaultTexture.createView();
-    }
-    let godRaysView;
-    if (this.godRaysTexture && this.godRaysTexture.width > 0 && this.godRaysTexture.height > 0) {
-      godRaysView = this.godRaysTexture.createView();
-    } else {
-      godRaysView = this.defaultTexture.createView();
-    }
     const uniformData = new Float32Array([this.bloomIntensity, this.godRaysIntensity, 0, 0]);
-    const uniformBuffer = createBufferWithData(this.gDevice, uniformData, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, "ToneMapping Uniform Buffer");
-    const bg = this.gDevice.createBindGroup({
-      label: "ToneMapping Bind Group",
-      layout: this.pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: this.inputTexture.createView() },
-        { binding: 1, resource: this.gDevice.createSampler({ minFilter: "linear", magFilter: "linear" }) },
-        { binding: 2, resource: bloomView },
-        { binding: 3, resource: { buffer: uniformBuffer } },
-        { binding: 4, resource: godRaysView }
-      ]
-    });
+    this.gDevice.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
+    if (!this.bindGroup) {
+      const bloomView = this.bloomTexture && this.bloomTexture.width > 0 && this.bloomTexture.height > 0 ? this.bloomTexture.createView() : this.defaultTexture.createView();
+      const godRaysView = this.godRaysTexture && this.godRaysTexture.width > 0 && this.godRaysTexture.height > 0 ? this.godRaysTexture.createView() : this.defaultTexture.createView();
+      this.bindGroup = this.gDevice.createBindGroup({
+        label: "ToneMapping Bind Group",
+        layout: this.pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: this.inputTexture.createView() },
+          { binding: 1, resource: this.sampler },
+          { binding: 2, resource: bloomView },
+          { binding: 3, resource: { buffer: this.uniformBuffer } },
+          { binding: 4, resource: godRaysView }
+        ]
+      });
+    }
+    const bg = this.bindGroup;
     const passDescriptor = {
       colorAttachments: [
         {
@@ -27914,6 +28413,7 @@ class BloomPass {
   upsamplePipeline = null;
   bindGroupLayout = null;
   sampler = null;
+  uniformBuffer = null;
   targetMipLevels = 5;
   actualMipLevels = 5;
   constructor() {}
@@ -27924,6 +28424,11 @@ class BloomPass {
       magFilter: "linear",
       addressModeU: "clamp-to-edge",
       addressModeV: "clamp-to-edge"
+    });
+    this.uniformBuffer = device.createBuffer({
+      label: "Bloom Uniform Buffer",
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
     this.bindGroupLayout = device.createBindGroupLayout({
       label: "Bloom Layout",
@@ -27976,7 +28481,8 @@ class BloomPass {
       return;
     this.ensurePipelines(this.device);
     const uniformData = new Float32Array([this.threshold, this.knee, this.intensity, 0]);
-    const uniformBuffer = createBufferWithData(this.device, uniformData, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, "Bloom Uniform Buffer");
+    this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
+    const uniformBuffer = this.uniformBuffer;
     const prefilterBG = this.device.createBindGroup({
       layout: this.bindGroupLayout,
       entries: [
@@ -29652,6 +30158,7 @@ class DepthOfFieldPass {
   cocTexture = null;
   blurTextureA = null;
   blurTextureB = null;
+  uniformBuffer = null;
   inputTexture = null;
   enabled = false;
   focusDistance = 10;
@@ -29688,6 +30195,11 @@ class DepthOfFieldPass {
         { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
         { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: {} }
       ]
+    });
+    this.uniformBuffer = device.createBuffer({
+      label: "DOF Uniform Buffer",
+      size: 48,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
     this.createPipelines(device);
   }
@@ -29755,17 +30267,11 @@ class DepthOfFieldPass {
       0,
       0
     ]);
-    const uniformBuffer = this.device.createBuffer({
-      size: 48,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-      mappedAtCreation: true
-    });
-    new Float32Array(uniformBuffer.getMappedRange()).set(uniformData);
-    uniformBuffer.unmap();
-    this.executeCoCPass(commandEncoder, uniformBuffer);
-    this.executeBlurPass(commandEncoder, uniformBuffer, true);
-    this.executeBlurPass(commandEncoder, uniformBuffer, false);
-    this.executeCompositePass(commandEncoder, uniformBuffer);
+    this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
+    this.executeCoCPass(commandEncoder, this.uniformBuffer);
+    this.executeBlurPass(commandEncoder, this.uniformBuffer, true);
+    this.executeBlurPass(commandEncoder, this.uniformBuffer, false);
+    this.executeCompositePass(commandEncoder, this.uniformBuffer);
   }
   executeCoCPass(commandEncoder, uniformBuffer) {
     if (!this.device || !this.cocPipeline || !this.inputTexture || !this.gBuffer.depthTexture || !this.cocTexture || !this.blurTextureA)
@@ -29797,14 +30303,6 @@ class DepthOfFieldPass {
       return;
     const source = horizontal ? this.inputTexture : this.blurTextureA;
     const target = horizontal ? this.blurTextureA : this.blurTextureB;
-    const dirData = new Float32Array([horizontal ? 1 : 0, horizontal ? 0 : 1]);
-    const dirBuffer = this.device.createBuffer({
-      size: 16,
-      usage: GPUBufferUsage.UNIFORM,
-      mappedAtCreation: true
-    });
-    new Float32Array(dirBuffer.getMappedRange()).set([...dirData, 0, 0]);
-    dirBuffer.unmap();
     const bindGroup = this.device.createBindGroup({
       layout: this.bindGroupLayout,
       entries: [
@@ -30866,6 +31364,7 @@ class GodRaysPass {
   bindGroup = null;
   uniformBuffer = null;
   sampler = null;
+  depthSampler = null;
   enabled = false;
   intensity = 1;
   decay = 0.96;
@@ -30885,6 +31384,10 @@ class GodRaysPass {
       magFilter: "linear",
       addressModeU: "clamp-to-edge",
       addressModeV: "clamp-to-edge"
+    });
+    this.depthSampler = device.createSampler({
+      minFilter: "nearest",
+      magFilter: "nearest"
     });
     this.uniformBuffer = device.createBuffer({
       label: "GodRays Uniform Buffer",
@@ -31145,10 +31648,6 @@ class GodRaysPass {
     const depthView = this.gBuffer.depthTexture.createView({
       aspect: "depth-only"
     });
-    const depthSampler = this.device.createSampler({
-      minFilter: "nearest",
-      magFilter: "nearest"
-    });
     this.bindGroup = this.device.createBindGroup({
       label: "God Rays Bind Group",
       layout: this.bindGroupLayout,
@@ -31156,7 +31655,7 @@ class GodRaysPass {
         { binding: 0, resource: this.inputTexture.createView() },
         { binding: 1, resource: depthView },
         { binding: 2, resource: this.sampler },
-        { binding: 3, resource: depthSampler },
+        { binding: 3, resource: this.depthSampler },
         { binding: 4, resource: { buffer: this.uniformBuffer } }
       ]
     });
@@ -32054,7 +32553,9 @@ async function main() {
   console.log("Loading Sponza...");
   let sponzaNode = null;
   try {
-    sponzaNode = await loadGLBModel(device, sponzaPath);
+    const loader = new GLBLoader(device, { dracoDecoderPath: "./draco/" });
+    const result = await loader.load(sponzaPath);
+    sponzaNode = result.rootNode;
     if (sponzaNode) {
       sponzaNode.transform.scale = new Vector3(1, 1, 1);
       scene.addChild(sponzaNode);
