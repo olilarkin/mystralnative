@@ -17,7 +17,6 @@ permissions:
 env:
   DEMO_NAME: Sponza
   DEMO_ENTRY: examples/sponza.js
-  DEMO_ASSETS: examples/assets
 
 jobs:
   # ===========================================================================
@@ -113,10 +112,24 @@ jobs:
           strip build/mystral
           echo "Stripped binary size: $(du -h build/mystral | awk '{print $1}')"
 
+      - name: Prepare sponza assets
+        run: |
+          # Remove unused assets to keep bundle small (only Sponza.glb needed)
+          rm -f examples/assets/DamagedHelmet.glb
+          rm -f examples/assets/environment.hdr
+          rm -f examples/assets/draco_decoder.js
+          rm -f examples/assets/draco_decoder.wasm
+          rm -f examples/assets/draco-worker.js
+          echo "Assets for bundle:"
+          ls -lh examples/assets/
+          echo "Draco decoder:"
+          ls -lh draco/
+
       - name: Create standalone bundle
         run: |
           ./build/mystral compile ${{ env.DEMO_ENTRY }} \
-            --include ${{ env.DEMO_ASSETS }} \
+            --include examples/assets \
+            --include draco \
             --bundle-only \
             --output build/sponza.bundle
           echo "Bundle size: $(du -h build/sponza.bundle | awk '{print $1}')"
@@ -242,10 +255,19 @@ jobs:
           strip build/mystral
           echo "Stripped binary size: $(du -h build/mystral | awk '{print $1}')"
 
+      - name: Prepare sponza assets
+        run: |
+          rm -f examples/assets/DamagedHelmet.glb
+          rm -f examples/assets/environment.hdr
+          rm -f examples/assets/draco_decoder.js
+          rm -f examples/assets/draco_decoder.wasm
+          rm -f examples/assets/draco-worker.js
+
       - name: Compile Sponza demo
         run: |
           ./build/mystral compile ${{ env.DEMO_ENTRY }} \
-            --include ${{ env.DEMO_ASSETS }} \
+            --include examples/assets \
+            --include draco \
             --output build/sponza
           echo "Compiled binary size: $(du -h build/sponza | awk '{print $1}')"
 
@@ -327,6 +349,15 @@ jobs:
         shell: bash
         run: ./build/Release/mystral.exe --version || echo "Build complete"
 
+      - name: Prepare sponza assets
+        shell: bash
+        run: |
+          rm -f examples/assets/DamagedHelmet.glb
+          rm -f examples/assets/environment.hdr
+          rm -f examples/assets/draco_decoder.js
+          rm -f examples/assets/draco_decoder.wasm
+          rm -f examples/assets/draco-worker.js
+
       - name: Compile Sponza demo
         shell: bash
         run: |
@@ -336,7 +367,8 @@ jobs:
             MYSTRAL_BIN="build/mystral.exe"
           fi
           "$MYSTRAL_BIN" compile "${{ env.DEMO_ENTRY }}" \
-            --include "${{ env.DEMO_ASSETS }}" \
+            --include examples/assets \
+            --include draco \
             --output build/sponza
 
           # Find the compiled output
@@ -418,6 +450,8 @@ jobs:
             ## Sponza Demo
 
             A standalone demo of the Sponza palace rendered natively with WebGPU via MystralNative (V8 + Dawn).
+
+            Uses Draco mesh compression + WebP textures for optimized asset size.
 
             ### Downloads
 
