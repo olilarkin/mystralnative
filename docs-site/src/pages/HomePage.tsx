@@ -17,6 +17,11 @@ export default function HomePage() {
 
       <div style={{ marginTop: 'var(--navbar-height)' }}>
         <section className="hero">
+          <img
+            src="/mystralnative/mystralnative.png"
+            alt="Mystral Native.js"
+            style={{ maxWidth: '500px', width: '100%', marginBottom: '24px', borderRadius: '12px' }}
+          />
           <h1>Mystral Native.js</h1>
           <p>
             Run WebGPU games natively with JavaScript. Build once, run everywhere —
