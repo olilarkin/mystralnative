@@ -301,11 +301,13 @@ a:hover {
 
 .install-tabs {
   margin: 32px auto;
-  max-width: 650px;
+  max-width: 750px;
+  text-align: left;
 }
 
 .install-tab-buttons {
   display: flex;
+  align-items: center;
   gap: 0;
   margin-bottom: -1px;
   position: relative;
@@ -341,10 +343,7 @@ a:hover {
   padding: 16px 24px;
   font-family: 'SF Mono', 'Fira Code', monospace;
   font-size: 0.9rem;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
+  overflow-x: auto;
 }
 
 .install-command code {
@@ -352,9 +351,11 @@ a:hover {
   padding: 0;
   font-size: inherit;
   font-family: inherit;
+  white-space: pre;
 }
 
 .install-copy-btn {
+  margin-left: auto;
   background: var(--color-border);
   color: var(--color-text-muted);
   border: none;

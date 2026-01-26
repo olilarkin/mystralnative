@@ -1,22 +1,14 @@
+import { InstallTabs, VerifyTabs } from '../src/components/InstallTabs';
+
 # Installation
 
 There are several ways to install Mystral Native.js depending on your needs.
 
 ## Quick Install (Recommended)
 
-### macOS / Linux
+<InstallTabs />
 
-```bash
-curl -fsSL https://mystralengine.github.io/mystralnative/install.sh | bash
-```
-
-### Windows (PowerShell)
-
-```powershell
-irm https://mystralengine.github.io/mystralnative/install.ps1 | iex
-```
-
-Both scripts will:
+This will:
 1. Detect your platform and architecture
 2. Download the latest release
 3. Extract to `~/.mystral/` (macOS/Linux) or `$HOME\.mystral\` (Windows)
@@ -77,23 +69,7 @@ See [Building from Source](/mystralnative/docs/guides/building) for advanced bui
 
 After installation, verify everything is working:
 
-### macOS / Linux
-
-```bash
-mystral --version
-
-# Examples are in the install directory
-cd ~/.mystral && mystral run examples/triangle.js
-```
-
-### Windows (PowerShell)
-
-```powershell
-mystral.exe --version
-
-# Examples are in the install directory
-cd $HOME\.mystral; .\mystral.exe run examples\triangle.js
-```
+<VerifyTabs />
 
 You should see a window with an orange triangle.
 

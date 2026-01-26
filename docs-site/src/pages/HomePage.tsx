@@ -34,7 +34,7 @@ export default function HomePage() {
             style={{ maxWidth: '500px', width: '100%', marginBottom: '24px', borderRadius: '12px' }}
           />
           <p>
-            Run WebGPU games natively with JavaScript. Build once, run everywhere —
+            Run WebGPU games natively with JavaScript. Write once, run everywhere —
             macOS, Windows, Linux, iOS, and Android.
           </p>
 
@@ -52,13 +52,6 @@ export default function HomePage() {
               >
                 Windows
               </button>
-            </div>
-            <div className="install-command">
-              <code>
-                {tab === 'unix'
-                  ? 'curl -fsSL https://mystralengine.github.io/mystralnative/install.sh | bash'
-                  : 'irm https://mystralengine.github.io/mystralnative/install.ps1 | iex'}
-              </code>
               <button
                 className="install-copy-btn"
                 onClick={async () => {
@@ -72,6 +65,13 @@ export default function HomePage() {
               >
                 {copied ? 'Copied!' : 'Copy'}
               </button>
+            </div>
+            <div className="install-command">
+              <code>
+                {tab === 'unix'
+                  ? 'curl -fsSL https://mystralengine.github.io/mystralnative/install.sh | bash'
+                  : 'irm https://mystralengine.github.io/mystralnative/install.ps1 | iex'}
+              </code>
             </div>
           </div>
 
