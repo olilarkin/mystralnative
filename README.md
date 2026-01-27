@@ -2,6 +2,12 @@
   <img src="mystralnative.jpg" alt="Mystral Native.js" width="600" />
 </p>
 
+<p align="center">
+  <a href="https://discord.gg/jUYC9dMbu5"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
+  <a href="https://github.com/mystralengine/mystralnative/releases"><img src="https://img.shields.io/github/v/release/mystralengine/mystralnative?label=Release" alt="Release" /></a>
+  <a href="https://github.com/mystralengine/mystralnative/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" /></a>
+</p>
+
 # Mystral Native.js
 
 **Run JavaScript/TypeScript games natively with WebGPU.** Mystral Native.js is a lightweight runtime that lets you write games using familiar Web APIs (WebGPU, Canvas, Audio, fetch) and run them as native desktop applications on macOS, Windows, and Linux.

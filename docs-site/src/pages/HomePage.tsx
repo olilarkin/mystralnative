@@ -20,6 +20,9 @@ export default function HomePage() {
         </Link>
         <div className="navbar-links">
           <Link to="/docs/getting-started">Docs</Link>
+          <a href="https://discord.gg/jUYC9dMbu5" target="_blank" rel="noopener">
+            Discord
+          </a>
           <a href="https://github.com/mystralengine/mystralnative" target="_blank" rel="noopener">
             GitHub
           </a>
