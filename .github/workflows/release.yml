@@ -403,6 +403,33 @@ jobs:
     if: always()
 
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Get tag name
+        id: tag
+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Commit version from tag to source files
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "Updating source files to version $VERSION"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          node scripts/set-version.mjs "$VERSION"
+          git add package.json CMakeLists.txt include/mystral/runtime.h
+          git diff --cached --quiet || {
+            git commit -m "Bump version to $VERSION"
+            git push origin main
+          }
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -418,10 +445,6 @@ jobs:
             fi
           done
           ls -la release/
-
-      - name: Get tag name
-        id: tag
-        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
