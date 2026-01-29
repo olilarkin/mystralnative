@@ -103,8 +103,17 @@ get_latest_version() {
 select_build() {
     # Default to V8 + Dawn for best compatibility
     # Dawn is recommended for mystral-helmet and full Mystral Engine demos
-    JS_ENGINE="v8"
     WEBGPU_BACKEND="dawn"
+
+    # Select JS engine based on platform
+    # macOS x64 only has JSC builds (V8 not available for legacy Intel Macs)
+    if [ "$PLATFORM" = "macOS-x64" ]; then
+        JS_ENGINE="jsc"
+        warn "Intel Mac detected. Using JSC engine (V8 not available for x64)."
+        warn "Note: Requires macOS 14+ (Sonoma) due to Metal API requirements."
+    else
+        JS_ENGINE="v8"
+    fi
 
     BUILD_NAME="mystral-${PLATFORM}-${JS_ENGINE}-${WEBGPU_BACKEND}"
     DOWNLOAD_URL="https://github.com/$REPO/releases/download/$VERSION/${BUILD_NAME}.zip"
