@@ -105,20 +105,25 @@ jobs:
         if: ${{ inputs.test_rendering }}
         run: |
           echo "=== Running rotating-cube.js with 5 second timeout ==="
-          # Run with timeout - the example runs indefinitely so we kill it after 5 seconds
-          # If it crashes immediately with symbol errors, the timeout won't save it
-          timeout 5 ./build/mystral run ./examples/rotating-cube.js 2>&1 || {
+          # macOS doesn't have 'timeout' command - use background process with kill
+          ./build/mystral run ./examples/rotating-cube.js 2>&1 &
+          PID=$!
+          sleep 5
+          if kill -0 $PID 2>/dev/null; then
+            echo "Test passed - example ran for 5 seconds without crashing"
+            kill $PID 2>/dev/null || true
+            exit 0
+          else
+            wait $PID
             EXIT_CODE=$?
-            if [ $EXIT_CODE -eq 124 ]; then
-              echo "Test passed - example ran for 5 seconds without crashing"
-            elif [ $EXIT_CODE -eq 134 ]; then
+            if [ $EXIT_CODE -eq 134 ] || [ $EXIT_CODE -eq 6 ]; then
               echo "ERROR: Aborted (SIGABRT) - likely symbol not found error"
               exit 1
             else
-              echo "ERROR: Example exited with code $EXIT_CODE"
+              echo "ERROR: Example exited early with code $EXIT_CODE"
               exit 1
             fi
-          }
+          fi
 
       - name: Package artifacts
         run: |
