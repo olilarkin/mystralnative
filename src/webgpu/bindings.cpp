@@ -992,7 +992,11 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                     wgpuCommandBufferRelease(cmdBuf);
                                 }
                                 // Tick to flush GPU work
+#if defined(MYSTRAL_WEBGPU_DAWN)
                                 wgpuDeviceTick(g_device);
+#elif defined(MYSTRAL_WEBGPU_WGPU)
+                                wgpuDevicePoll(g_device, false, nullptr);
+#endif
                                 std::cout << "[WebGPU] Submit #" << submitCount << ": " << cmdBuffers.size() << " command buffers, g_currentTexture=" << (void*)g_currentTexture << std::endl;
                             } else {
                                 std::cout << "[WebGPU] Submit #" << submitCount << ": EMPTY (length=" << length << "), g_currentTexture=" << (void*)g_currentTexture << std::endl;
@@ -1062,7 +1066,11 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                 // Wait for GPU work to complete before present
                                 // This ensures the screenshot copy finishes before the texture is released
                                 for (int syncIter = 0; syncIter < 100; syncIter++) {
+#if defined(MYSTRAL_WEBGPU_DAWN)
                                     wgpuDeviceTick(g_device);
+#elif defined(MYSTRAL_WEBGPU_WGPU)
+                                    wgpuDevicePoll(g_device, false, nullptr);
+#endif
                                     if (g_instance) {
                                         wgpuInstanceProcessEvents(g_instance);
                                     }
