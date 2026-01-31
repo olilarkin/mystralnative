@@ -149,8 +149,8 @@ jobs:
           fi
 
           # Also run a simple JS test to verify basic functionality
-          echo 'console.log("Intel Mac verification test passed");' > /tmp/test.js
-          ./build/mystral run /tmp/test.js --headless || echo "::warning::Headless test failed (may need GPU)"
+          echo 'console.log("Intel Mac verification test passed"); process.exit(0);' > /tmp/test.js
+          timeout 30 ./build/mystral run /tmp/test.js --headless || echo "::warning::Headless test failed (may need GPU)"
 
       - name: Package artifacts
         run: |
