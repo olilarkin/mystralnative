@@ -28,6 +28,13 @@
 #include <unordered_set>
 #include <regex>
 #include <queue>
+#include <array>
+
+// WebP animation encoding (for video recording)
+#ifdef MYSTRAL_HAS_WEBP_MUX
+#include <webp/encode.h>
+#include <webp/mux.h>
+#endif
 
 // Platform-specific headers for process termination
 #ifdef _WIN32
@@ -65,6 +72,14 @@ RUN OPTIONS:
     --frames <n>          Number of frames before screenshot (default: 60)
     --quiet, -q           Suppress all output except errors
 
+VIDEO RECORDING OPTIONS:
+    --video <file>        Record video to file (WebP format, or MP4 with --mp4)
+    --start-frame <n>     First frame to capture (default: 0)
+    --end-frame <n>       Last frame to capture (required for video recording)
+    --video-fps <n>       Video framerate (default: 60)
+    --video-quality <n>   WebP quality 0-100 (default: 80, higher = better)
+    --mp4                 Convert to MP4 via FFmpeg (auto-detected if --video ends in .mp4)
+
 COMPILE OPTIONS:
     --include <dir>       Asset directory to bundle (repeatable)
     --assets <dir>        Alias for --include
@@ -83,7 +98,7 @@ HEADLESS MODE:
     - Window is created but hidden
     - WebGPU rendering still works (GPU is used)
     - All JavaScript APIs work normally
-    - Combine with --screenshot for automated rendering
+    - Combine with --screenshot or --video for automated capture
 
 SCREENSHOT MODE:
     Capture rendered output to a PNG file:
@@ -91,15 +106,23 @@ SCREENSHOT MODE:
     mystral run scene.js --screenshot output.png              # 60 frames (default)
     mystral run scene.js --screenshot output.png --frames 120 # 120 frames
 
-    Useful for:
-    - Automated visual regression testing
-    - CI/CD pipelines
-    - Headless image generation
+VIDEO RECORDING MODE:
+    Record game output to an animated WebP or MP4 file:
+
+    mystral run game.js --video demo.webp --end-frame 300     # 5 sec at 60fps
+    mystral run game.js --video demo.mp4 --end-frame 600      # 10 sec, auto-convert
+    mystral run game.js --video demo.webp --mp4 --end-frame 300  # Explicit MP4 convert
+
+    Notes:
+    - MP4 conversion requires FFmpeg installed on your system
+    - If FFmpeg is not found, the WebP file is kept
+    - WebP files play directly in browsers and most apps
 
 EXAMPLES:
     mystral run game.js                                       # Run interactively
     mystral run app.js --width 1920 --height 1080             # Custom size
     mystral run test.js --headless --screenshot out.png       # Headless + screenshot
+    mystral run game.js --headless --video out.mp4 --end-frame 300  # Record 5 sec video
     MYSTRAL_HEADLESS=1 mystral run render.js --screenshot render.png --frames 10
     mystral compile game.js --include assets --out my-game    # Bundle into a single binary
     mystral compile game.js --include assets --out game.bundle --bundle-only  # Standalone bundle file
@@ -138,6 +161,14 @@ struct CLIOptions {
     int frames = 60;
     bool quiet = false;
     bool noSdl = false;  // Run without SDL (headless GPU, no window)
+
+    // Video recording mode
+    std::string videoPath;      // Output video path
+    int startFrame = 0;         // First frame to capture
+    int endFrame = -1;          // Last frame to capture (-1 = unlimited until quit)
+    int videoFps = 60;          // Video framerate
+    int videoQuality = 80;      // WebP quality (0-100, higher = better quality, larger file)
+    bool convertToMp4 = false;  // Convert WebP to MP4 via FFmpeg
 
     // Compile options
     std::vector<std::string> assetDirs;
@@ -184,6 +215,25 @@ CLIOptions parseArgs(int argc, char* argv[]) {
             opts.watch = true;
         } else if (arg == "--bundle-only") {
             opts.bundleOnly = true;
+        } else if (arg == "--video" && i + 1 < argc) {
+            opts.videoPath = argv[++i];
+            // Auto-detect --mp4 from extension
+            if (opts.videoPath.size() > 4) {
+                std::string ext = opts.videoPath.substr(opts.videoPath.size() - 4);
+                if (ext == ".mp4" || ext == ".MP4") {
+                    opts.convertToMp4 = true;
+                }
+            }
+        } else if (arg == "--start-frame" && i + 1 < argc) {
+            opts.startFrame = std::stoi(argv[++i]);
+        } else if (arg == "--end-frame" && i + 1 < argc) {
+            opts.endFrame = std::stoi(argv[++i]);
+        } else if (arg == "--video-fps" && i + 1 < argc) {
+            opts.videoFps = std::stoi(argv[++i]);
+        } else if (arg == "--video-quality" && i + 1 < argc) {
+            opts.videoQuality = std::stoi(argv[++i]);
+        } else if (arg == "--mp4") {
+            opts.convertToMp4 = true;
         } else if ((arg == "run") && opts.command.empty()) {
             opts.command = "run";
         } else if ((arg == "compile" || arg == "--compile") && opts.command.empty()) {
@@ -424,6 +474,304 @@ static bool collectDependencies(
     return true;
 }
 
+// ============================================================================
+// Video Recording (Animated WebP)
+// ============================================================================
+
+#ifdef MYSTRAL_HAS_WEBP_MUX
+
+/**
+ * WebP Video Recorder
+ *
+ * Records frames to an animated WebP file using libwebp's WebPAnimEncoder.
+ * Optionally converts to MP4 using FFmpeg if available.
+ */
+class WebPVideoRecorder {
+public:
+    WebPVideoRecorder(int width, int height, int fps, int quality)
+        : width_(width), height_(height), fps_(fps), quality_(quality),
+          encoder_(nullptr), frameCount_(0), timestampMs_(0) {
+
+        // Initialize animation encoder options
+        if (!WebPAnimEncoderOptionsInit(&encOptions_)) {
+            std::cerr << "[Video] Failed to initialize WebP encoder options" << std::endl;
+            return;
+        }
+
+        // Set encoding options
+        encOptions_.anim_params.loop_count = 0;  // Infinite loop
+        encOptions_.allow_mixed = 0;  // All frames same format
+        encOptions_.minimize_size = 0;  // Prioritize speed over size
+        // Force every frame to be a keyframe (prevents frame differencing artifacts)
+        encOptions_.kmin = 1;
+        encOptions_.kmax = 1;
+
+        // Create encoder
+        encoder_ = WebPAnimEncoderNew(width, height, &encOptions_);
+        if (!encoder_) {
+            std::cerr << "[Video] Failed to create WebP animation encoder" << std::endl;
+            return;
+        }
+
+        // Calculate frame duration in milliseconds
+        frameDurationMs_ = 1000 / fps;
+    }
+
+    ~WebPVideoRecorder() {
+        if (encoder_) {
+            WebPAnimEncoderDelete(encoder_);
+        }
+    }
+
+    bool isValid() const {
+        return encoder_ != nullptr;
+    }
+
+    /**
+     * Add a frame from RGBA pixel data
+     * @param rgbaData Pointer to RGBA pixel data (width * height * 4 bytes)
+     * @return true on success
+     */
+    bool addFrame(const uint8_t* rgbaData) {
+        if (!encoder_) return false;
+
+        // Set up WebP picture
+        WebPPicture pic;
+        if (!WebPPictureInit(&pic)) {
+            std::cerr << "[Video] Failed to init WebP picture" << std::endl;
+            return false;
+        }
+
+        pic.width = width_;
+        pic.height = height_;
+        pic.use_argb = 1;  // Use ARGB format
+
+        // Allocate picture buffer
+        if (!WebPPictureAlloc(&pic)) {
+            std::cerr << "[Video] Failed to allocate WebP picture" << std::endl;
+            return false;
+        }
+
+        // Convert RGBA to ARGB (WebP's internal format)
+        // RGBA: R G B A -> ARGB: A R G B (but stored as 32-bit words)
+        // Actually WebPPictureImportRGBA handles this for us
+        if (!WebPPictureImportRGBA(&pic, rgbaData, width_ * 4)) {
+            std::cerr << "[Video] Failed to import RGBA data" << std::endl;
+            WebPPictureFree(&pic);
+            return false;
+        }
+
+        // Set up encoding config
+        WebPConfig config;
+        if (!WebPConfigInit(&config)) {
+            std::cerr << "[Video] Failed to init WebP config" << std::endl;
+            WebPPictureFree(&pic);
+            return false;
+        }
+
+        // Set quality (0-100)
+        config.quality = static_cast<float>(quality_);
+        config.method = 4;  // Compression method (0=fast, 6=slow but better)
+
+        // Add frame to animation
+        if (!WebPAnimEncoderAdd(encoder_, &pic, timestampMs_, &config)) {
+            std::cerr << "[Video] Failed to add frame: " << WebPAnimEncoderGetError(encoder_) << std::endl;
+            WebPPictureFree(&pic);
+            return false;
+        }
+
+        WebPPictureFree(&pic);
+
+        frameCount_++;
+        timestampMs_ += frameDurationMs_;
+
+        return true;
+    }
+
+    /**
+     * Finalize and save the video to a file
+     * @param outputPath Path to save the WebP file
+     * @return true on success
+     */
+    bool save(const std::string& outputPath) {
+        if (!encoder_) return false;
+
+        // Add final "null" frame to signal end of animation
+        if (!WebPAnimEncoderAdd(encoder_, nullptr, timestampMs_, nullptr)) {
+            std::cerr << "[Video] Failed to finalize animation" << std::endl;
+            return false;
+        }
+
+        // Assemble the animation
+        WebPData webpData;
+        WebPDataInit(&webpData);
+
+        if (!WebPAnimEncoderAssemble(encoder_, &webpData)) {
+            std::cerr << "[Video] Failed to assemble animation: " << WebPAnimEncoderGetError(encoder_) << std::endl;
+            return false;
+        }
+
+        // Write to file
+        std::ofstream file(outputPath, std::ios::binary);
+        if (!file.is_open()) {
+            std::cerr << "[Video] Failed to open output file: " << outputPath << std::endl;
+            WebPDataClear(&webpData);
+            return false;
+        }
+
+        file.write(reinterpret_cast<const char*>(webpData.bytes), webpData.size);
+        file.close();
+
+        WebPDataClear(&webpData);
+
+        return true;
+    }
+
+    int getFrameCount() const { return frameCount_; }
+
+private:
+    int width_;
+    int height_;
+    int fps_;
+    int quality_;
+    WebPAnimEncoder* encoder_;
+    WebPAnimEncoderOptions encOptions_;
+    int frameCount_;
+    int timestampMs_;
+    int frameDurationMs_;
+};
+
+#endif // MYSTRAL_HAS_WEBP_MUX
+
+/**
+ * Check if FFmpeg is available on the system
+ */
+static bool isFFmpegAvailable() {
+#ifdef _WIN32
+    int result = system("where ffmpeg >nul 2>nul");
+#else
+    int result = system("which ffmpeg >/dev/null 2>&1");
+#endif
+    return result == 0;
+}
+
+/**
+ * Convert WebP to MP4 using FFmpeg
+ * Note: FFmpeg's native webp decoder doesn't support animated WebP.
+ * We use the anim_dump approach: extract frames, then encode.
+ * @param webpPath Input WebP file path
+ * @param mp4Path Output MP4 file path
+ * @param fps Video framerate
+ * @param deleteWebp Whether to delete the WebP file after conversion
+ * @return true on success
+ */
+static bool convertWebPToMP4(const std::string& webpPath, const std::string& mp4Path, int fps, bool deleteWebp, bool quiet) {
+    if (!isFFmpegAvailable()) {
+        if (!quiet) {
+            std::cerr << "[Video] FFmpeg not found. WebP file saved: " << webpPath << std::endl;
+            std::cerr << "[Video] Note: Animated WebP plays in browsers and many apps" << std::endl;
+            std::cerr << "[Video] To convert to MP4, install FFmpeg and use a tool that supports animated WebP" << std::endl;
+        }
+        return false;
+    }
+
+    // Create temp directory for frames
+    std::error_code ec;
+    std::filesystem::path tempDir = std::filesystem::temp_directory_path(ec) / ("mystral-video-" + std::to_string(std::time(nullptr)));
+    if (ec) {
+        if (!quiet) std::cerr << "[Video] Failed to get temp directory" << std::endl;
+        return false;
+    }
+    std::filesystem::create_directories(tempDir, ec);
+    if (ec) {
+        if (!quiet) std::cerr << "[Video] Failed to create temp directory" << std::endl;
+        return false;
+    }
+
+    // Check if webpmux is available (from libwebp package)
+    bool hasWebpmux = false;
+#ifdef _WIN32
+    hasWebpmux = system("where webpmux >nul 2>nul") == 0;
+#else
+    hasWebpmux = system("which webpmux >/dev/null 2>&1") == 0;
+#endif
+
+    bool success = false;
+
+    if (hasWebpmux) {
+        // Use webpmux to extract frames, then ffmpeg to encode
+        if (!quiet) std::cout << "[Video] Extracting frames with webpmux..." << std::endl;
+
+        // Get frame count (we'll try up to 10000 frames)
+        std::string extractCmd = "webpmux -get frame 1 \"" + webpPath + "\" -o \"" + tempDir.string() + "/frame_0001.webp\"";
+#ifdef _WIN32
+        extractCmd += " 2>nul";
+#else
+        extractCmd += " 2>/dev/null";
+#endif
+
+        // Extract first frame to test
+        if (system(extractCmd.c_str()) != 0) {
+            if (!quiet) std::cerr << "[Video] Failed to extract frames from animated WebP" << std::endl;
+        } else {
+            // Extract all frames
+            int frameNum = 1;
+            while (frameNum <= 10000) {
+                char framePath[512];
+                snprintf(framePath, sizeof(framePath), "%s/frame_%04d.webp", tempDir.string().c_str(), frameNum);
+
+                std::string cmd = "webpmux -get frame " + std::to_string(frameNum) + " \"" + webpPath + "\" -o \"" + framePath + "\"";
+#ifdef _WIN32
+                cmd += " 2>nul";
+#else
+                cmd += " 2>/dev/null";
+#endif
+                if (system(cmd.c_str()) != 0) break;
+                frameNum++;
+            }
+
+            if (frameNum > 1) {
+                if (!quiet) std::cout << "[Video] Extracted " << (frameNum - 1) << " frames, encoding to MP4..." << std::endl;
+
+                // Use FFmpeg to encode frames to MP4
+                std::string ffmpegCmd = "ffmpeg -y -framerate " + std::to_string(fps) +
+                    " -i \"" + tempDir.string() + "/frame_%04d.webp\" -c:v libx264 -pix_fmt yuv420p -crf 18 \"" + mp4Path + "\"";
+                if (quiet) ffmpegCmd += " -loglevel quiet";
+#ifdef _WIN32
+                else ffmpegCmd += " 2>nul";
+#endif
+
+                if (system(ffmpegCmd.c_str()) == 0) {
+                    success = true;
+                }
+            }
+        }
+    } else {
+        // webpmux not available, provide instructions
+        if (!quiet) {
+            std::cerr << "[Video] MP4 conversion requires 'webpmux' (from libwebp) to extract animated WebP frames" << std::endl;
+            std::cerr << "[Video] Install libwebp-tools: brew install webp (macOS) or apt install webp (Linux)" << std::endl;
+            std::cerr << "[Video] Or use an online converter that supports animated WebP to MP4" << std::endl;
+        }
+    }
+
+    // Cleanup temp directory
+    std::filesystem::remove_all(tempDir, ec);
+
+    if (success) {
+        // Delete the WebP file if requested
+        if (deleteWebp) {
+            std::filesystem::remove(webpPath, ec);
+        }
+    } else {
+        if (!quiet) {
+            std::cerr << "[Video] MP4 conversion failed. WebP file preserved: " << webpPath << std::endl;
+        }
+    }
+
+    return success;
+}
+
 static int compileBundle(const CLIOptions& opts) {
     namespace fs = std::filesystem;
 
@@ -656,6 +1004,7 @@ int runScript(const CLIOptions& opts) {
     }
 
     bool screenshotMode = !opts.screenshotPath.empty();
+    bool videoMode = !opts.videoPath.empty();
 
     if (!opts.quiet) {
         std::cout << "=== Mystral Native Runtime ===" << std::endl;
@@ -664,6 +1013,15 @@ int runScript(const CLIOptions& opts) {
         std::cout << "Window: " << opts.width << "x" << opts.height << std::endl;
         if (screenshotMode) {
             std::cout << "Screenshot mode: " << opts.frames << " frames -> " << opts.screenshotPath << std::endl;
+        }
+        if (videoMode) {
+            std::cout << "Video mode: frames " << opts.startFrame << "-";
+            if (opts.endFrame >= 0) {
+                std::cout << opts.endFrame;
+            } else {
+                std::cout << "end";
+            }
+            std::cout << " @ " << opts.videoFps << "fps -> " << opts.videoPath << std::endl;
         }
         if (opts.watch) {
             std::cout << "Watch mode: enabled (hot reload on file changes)" << std::endl;
@@ -728,6 +1086,121 @@ int runScript(const CLIOptions& opts) {
         std::cout.flush();
         std::cerr.flush();
         _exit(success ? 0 : 1);
+    } else if (videoMode) {
+        // Video recording mode
+#ifdef MYSTRAL_HAS_WEBP_MUX
+        // Validate options
+        if (opts.endFrame < 0) {
+            std::cerr << "Error: --end-frame is required for video recording" << std::endl;
+            std::cerr << "Example: mystral run game.js --video output.webp --end-frame 300" << std::endl;
+            return 1;
+        }
+
+        if (opts.endFrame <= opts.startFrame) {
+            std::cerr << "Error: --end-frame must be greater than --start-frame" << std::endl;
+            return 1;
+        }
+
+        // Determine output paths
+        std::string webpPath = opts.videoPath;
+        std::string mp4Path;
+        bool needsConversion = opts.convertToMp4;
+
+        // If output ends with .mp4, convert the path to .webp for intermediate file
+        if (needsConversion) {
+            // Generate MP4 path from video path
+            mp4Path = opts.videoPath;
+            size_t dotPos = mp4Path.rfind('.');
+            if (dotPos != std::string::npos) {
+                mp4Path = mp4Path.substr(0, dotPos) + ".mp4";
+            } else {
+                mp4Path = mp4Path + ".mp4";
+            }
+
+            // Ensure webp path has .webp extension
+            dotPos = webpPath.rfind('.');
+            if (dotPos != std::string::npos) {
+                std::string ext = webpPath.substr(dotPos);
+                if (ext != ".webp" && ext != ".WEBP") {
+                    webpPath = webpPath.substr(0, dotPos) + ".webp";
+                }
+            } else {
+                webpPath = webpPath + ".webp";
+            }
+        }
+
+        // Create video recorder
+        WebPVideoRecorder recorder(opts.width, opts.height, opts.videoFps, opts.videoQuality);
+        if (!recorder.isValid()) {
+            std::cerr << "Error: Failed to create video recorder" << std::endl;
+            return 1;
+        }
+
+        if (!opts.quiet) {
+            std::cout << "[Video] Recording " << (opts.endFrame - opts.startFrame) << " frames..." << std::endl;
+        }
+
+        auto startTime = std::chrono::high_resolution_clock::now();
+        int capturedFrames = 0;
+
+        for (int frame = 0; frame <= opts.endFrame; frame++) {
+            if (!runtime->pollEvents()) {
+                if (!opts.quiet) {
+                    std::cerr << "[Video] Runtime quit early at frame " << frame << std::endl;
+                }
+                break;
+            }
+
+            // Capture frames in the specified range
+            if (frame >= opts.startFrame) {
+                std::vector<uint8_t> frameData;
+                uint32_t frameWidth, frameHeight;
+
+                if (runtime->captureFrame(frameData, frameWidth, frameHeight)) {
+                    if (recorder.addFrame(frameData.data())) {
+                        capturedFrames++;
+                        if (!opts.quiet && capturedFrames % 60 == 0) {
+                            std::cout << "[Video] Captured frame " << capturedFrames << "/" << (opts.endFrame - opts.startFrame + 1) << std::endl;
+                        }
+                    }
+                }
+            }
+
+            // Small delay to let GPU work complete
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        auto endTime = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+
+        // Save the video
+        bool success = recorder.save(webpPath);
+
+        if (success) {
+            if (!opts.quiet) {
+                std::cout << "[Video] Saved WebP: " << webpPath << std::endl;
+                std::cout << "[Video] Recorded " << capturedFrames << " frames in " << duration.count() << "ms" << std::endl;
+            }
+
+            // Convert to MP4 if requested
+            if (needsConversion) {
+                if (convertWebPToMP4(webpPath, mp4Path, opts.videoFps, true, opts.quiet)) {
+                    if (!opts.quiet) {
+                        std::cout << "[Video] Converted to MP4: " << mp4Path << std::endl;
+                    }
+                }
+            }
+        } else {
+            std::cerr << "Error: Failed to save video!" << std::endl;
+        }
+
+        std::cout.flush();
+        std::cerr.flush();
+        _exit(success ? 0 : 1);
+#else
+        std::cerr << "Error: Video recording requires libwebpmux (build with MYSTRAL_HAS_WEBP_MUX)" << std::endl;
+        return 1;
+#endif
     } else {
         // Normal mode: run main loop until quit
         runtime->run();

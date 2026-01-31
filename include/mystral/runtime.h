@@ -3,6 +3,8 @@
 #include <memory>
 #include <string>
 #include <functional>
+#include <vector>
+#include <cstdint>
 
 namespace mystral {
 
@@ -151,6 +153,15 @@ public:
      * @return true on success
      */
     virtual bool saveScreenshot(const std::string& filename) = 0;
+
+    /**
+     * Capture the current frame as RGBA pixel data (for video recording)
+     * @param outData Output vector to receive RGBA data (width * height * 4 bytes)
+     * @param outWidth Output parameter for frame width
+     * @param outHeight Output parameter for frame height
+     * @return true on success
+     */
+    virtual bool captureFrame(std::vector<uint8_t>& outData, uint32_t& outWidth, uint32_t& outHeight) = 0;
 
 protected:
     Runtime() = default;

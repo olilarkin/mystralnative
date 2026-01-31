@@ -501,7 +501,7 @@ if(MYSTRAL_USE_JSC)
     endif()
 endif()
 
-# libwebp (for WebP image decoding - used by GLTF EXT_texture_webp extension)
+# libwebp (for WebP image decoding and animated WebP video recording)
 # Note: webp prebuilts are only available for desktop platforms (macOS, Linux, Windows)
 # iOS/Android cross-compilation would need webp built from source, which we skip for now
 set(WEBP_DIR ${THIRD_PARTY_DIR}/webp)
@@ -519,6 +519,16 @@ if(EXISTS ${WEBP_DIR} AND NOT IOS AND NOT ANDROID)
                 PATHS ${WEBP_ACTUAL_DIR}/lib
                 NO_DEFAULT_PATH
             )
+            find_library(WEBP_MUX_LIBRARY
+                NAMES webpmux libwebpmux
+                PATHS ${WEBP_ACTUAL_DIR}/lib
+                NO_DEFAULT_PATH
+            )
+            find_library(WEBP_SHARPYUV_LIBRARY
+                NAMES sharpyuv libsharpyuv
+                PATHS ${WEBP_ACTUAL_DIR}/lib
+                NO_DEFAULT_PATH
+            )
         else()
             # Prefer static library
             if(EXISTS ${WEBP_ACTUAL_DIR}/lib/libwebp.a)
@@ -529,6 +539,14 @@ if(EXISTS ${WEBP_DIR} AND NOT IOS AND NOT ANDROID)
                     PATHS ${WEBP_ACTUAL_DIR}/lib
                     NO_DEFAULT_PATH
                 )
+            endif()
+            # Find libwebpmux for animated WebP encoding
+            if(EXISTS ${WEBP_ACTUAL_DIR}/lib/libwebpmux.a)
+                set(WEBP_MUX_LIBRARY ${WEBP_ACTUAL_DIR}/lib/libwebpmux.a)
+            endif()
+            # Find libsharpyuv (required by libwebp for YUV conversion)
+            if(EXISTS ${WEBP_ACTUAL_DIR}/lib/libsharpyuv.a)
+                set(WEBP_SHARPYUV_LIBRARY ${WEBP_ACTUAL_DIR}/lib/libsharpyuv.a)
             endif()
         endif()
 
@@ -546,6 +564,26 @@ if(EXISTS ${WEBP_DIR} AND NOT IOS AND NOT ANDROID)
             add_compile_definitions(MYSTRAL_HAS_WEBP)
             message(STATUS "Found libwebp: ${WEBP_LIBRARY}")
             message(STATUS "libwebp includes: ${WEBP_INCLUDE_DIR}")
+
+            # Add webpmux target for animated WebP encoding
+            if(WEBP_MUX_LIBRARY)
+                add_library(webp::mux STATIC IMPORTED)
+                set_target_properties(webp::mux PROPERTIES
+                    IMPORTED_LOCATION ${WEBP_MUX_LIBRARY}
+                    INTERFACE_INCLUDE_DIRECTORIES ${WEBP_INCLUDE_DIR}
+                )
+                add_compile_definitions(MYSTRAL_HAS_WEBP_MUX)
+                message(STATUS "Found libwebpmux: ${WEBP_MUX_LIBRARY}")
+            endif()
+
+            # Add sharpyuv target (dependency for webp encoding)
+            if(WEBP_SHARPYUV_LIBRARY)
+                add_library(webp::sharpyuv STATIC IMPORTED)
+                set_target_properties(webp::sharpyuv PROPERTIES
+                    IMPORTED_LOCATION ${WEBP_SHARPYUV_LIBRARY}
+                )
+                message(STATUS "Found libsharpyuv: ${WEBP_SHARPYUV_LIBRARY}")
+            endif()
         else()
             message(WARNING "libwebp library or headers not found:")
             message(WARNING "  Library: ${WEBP_LIBRARY}")
@@ -1040,9 +1078,19 @@ else()
     message(STATUS "Found ZLIB: ${ZLIB_LIBRARIES}")
 endif()
 
-# libwebp linkage (optional - for WebP texture support)
+# libwebp linkage (optional - for WebP texture support and video recording)
+# Note: Link order matters! webpmux depends on webp, webp depends on sharpyuv
 if(TARGET webp::webp)
+    # Link sharpyuv first (dependency for webp encoding)
+    if(TARGET webp::sharpyuv)
+        target_link_libraries(mystral-runtime PRIVATE webp::sharpyuv)
+    endif()
+    # Link webp core
     target_link_libraries(mystral-runtime PRIVATE webp::webp)
+    # Link webpmux for animated WebP video recording
+    if(TARGET webp::mux)
+        target_link_libraries(mystral-runtime PRIVATE webp::mux)
+    endif()
 endif()
 
 # Skia linkage (optional - for Canvas 2D support)
@@ -1081,6 +1129,12 @@ endif()
 if(NOT MYSTRAL_PLATFORM STREQUAL "ios" AND NOT MYSTRAL_PLATFORM STREQUAL "android")
     add_executable(mystral src/cli/main.cpp)
     target_link_libraries(mystral PRIVATE mystral-runtime)
+
+    # Add webp include directories and definitions for video recording
+    if(TARGET webp::mux)
+        target_include_directories(mystral PRIVATE ${WEBP_INCLUDE_DIR})
+        target_compile_definitions(mystral PRIVATE MYSTRAL_HAS_WEBP_MUX)
+    endif()
 
     # macOS: Set rpath for redistributable binary
     # The binary will look for SDL3.framework next to the executable

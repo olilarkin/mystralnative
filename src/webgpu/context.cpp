@@ -1131,5 +1131,88 @@ bool Context::saveScreenshot(const char* filename) {
     return true;
 }
 
+bool Context::captureFrame(std::vector<uint8_t>& outData, uint32_t& outWidth, uint32_t& outHeight) {
+    if (!device_ || !queue_) {
+        return false;
+    }
+
+    // Check if screenshot buffer is ready (populated during queue.submit)
+    if (!isScreenshotReady()) {
+        return false;
+    }
+
+    WGPUBuffer screenshotBuffer = (WGPUBuffer)getScreenshotBuffer();
+    if (!screenshotBuffer) {
+        return false;
+    }
+
+    // Get dimensions
+    outWidth = getCurrentTextureWidth();
+    outHeight = getCurrentTextureHeight();
+    uint32_t bytesPerRow = getScreenshotBytesPerRow();
+    size_t bufferSize = getScreenshotBufferSize();
+
+    // Map the screenshot buffer
+    BufferMapData mapData;
+
+#if WGPU_BUFFER_MAP_USES_CALLBACK_INFO
+    WGPUBufferMapCallbackInfo mapCallbackInfo = {};
+    mapCallbackInfo.mode = WGPUCallbackMode_AllowProcessEvents;
+    mapCallbackInfo.callback = onBufferMapped;
+    mapCallbackInfo.userdata1 = &mapData;
+    mapCallbackInfo.userdata2 = nullptr;
+    wgpuBufferMapAsync(screenshotBuffer, WGPUMapMode_Read, 0, bufferSize, mapCallbackInfo);
+#else
+    wgpuBufferMapAsync(screenshotBuffer, WGPUMapMode_Read, 0, bufferSize, onBufferMapped, &mapData);
+#endif
+
+#if defined(MYSTRAL_WEBGPU_WGPU)
+    int maxIterations = 100;
+    while (!mapData.completed && maxIterations-- > 0) {
+        wgpuDevicePoll(device_, true, nullptr);
+    }
+#else
+    int maxIterations = 5000;
+    while (!mapData.completed && maxIterations-- > 0) {
+        wgpuDeviceTick(device_);
+        wgpuInstanceProcessEvents(instance_);
+        if (!mapData.completed && maxIterations % 100 == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+#endif
+
+    if (!mapData.completed || mapData.status != WGPUBufferMapAsyncStatus_Success_Compat) {
+        return false;
+    }
+
+    // Read the data
+    const void* mappedData = wgpuBufferGetConstMappedRange(screenshotBuffer, 0, bufferSize);
+    if (!mappedData) {
+        wgpuBufferUnmap(screenshotBuffer);
+        return false;
+    }
+
+    // Convert BGRA to RGBA and remove row padding
+    outData.resize(outWidth * outHeight * 4);
+    const uint8_t* src = static_cast<const uint8_t*>(mappedData);
+    uint8_t* dst = outData.data();
+
+    for (uint32_t y = 0; y < outHeight; y++) {
+        const uint8_t* srcRow = src + y * bytesPerRow;
+        uint8_t* dstRow = dst + y * outWidth * 4;
+        for (uint32_t x = 0; x < outWidth; x++) {
+            // BGRA -> RGBA
+            dstRow[x * 4 + 0] = srcRow[x * 4 + 2];  // R <- B
+            dstRow[x * 4 + 1] = srcRow[x * 4 + 1];  // G <- G
+            dstRow[x * 4 + 2] = srcRow[x * 4 + 0];  // B <- R
+            dstRow[x * 4 + 3] = srcRow[x * 4 + 3];  // A <- A
+        }
+    }
+
+    wgpuBufferUnmap(screenshotBuffer);
+    return true;
+}
+
 }  // namespace webgpu
 }  // namespace mystral

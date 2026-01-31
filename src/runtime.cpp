@@ -840,6 +840,13 @@ public:
         return webgpu_->saveScreenshot(filename.c_str());
     }
 
+    bool captureFrame(std::vector<uint8_t>& outData, uint32_t& outWidth, uint32_t& outHeight) override {
+        if (!webgpu_) {
+            return false;
+        }
+        return webgpu_->captureFrame(outData, outWidth, outHeight);
+    }
+
 private:
     void setupAnimationFrame() {
         if (!jsEngine_) return;

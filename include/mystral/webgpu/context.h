@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 // Forward declare WebGPU types to avoid header dependency
 typedef struct WGPUInstanceImpl* WGPUInstance;
@@ -109,6 +110,15 @@ public:
      * @return true on success
      */
     bool saveScreenshot(const char* filename);
+
+    /**
+     * Capture the current frame as RGBA pixel data
+     * @param outData Output vector to receive RGBA data (width * height * 4 bytes)
+     * @param outWidth Output parameter for frame width
+     * @param outHeight Output parameter for frame height
+     * @return true on success
+     */
+    bool captureFrame(std::vector<uint8_t>& outData, uint32_t& outWidth, uint32_t& outHeight);
 
     /**
      * Get surface dimensions
