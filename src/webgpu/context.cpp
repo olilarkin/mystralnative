@@ -1101,6 +1101,22 @@ bool Context::saveScreenshot(const char* filename) {
         return false;
     }
 
+    // Debug: Print first few bytes of mapped data (BGRA format)
+    const uint8_t* debugBytes = static_cast<const uint8_t*>(mappedData);
+    std::cout << "[Screenshot] First 16 bytes (BGRA raw): ";
+    for (int i = 0; i < 16; i++) {
+        std::cout << (int)debugBytes[i] << " ";
+    }
+    std::cout << std::endl;
+
+    // Also check bytes in the middle of the image
+    size_t midOffset = bytesPerRow * (height / 2) + (width / 2) * 4;
+    std::cout << "[Screenshot] Middle bytes (BGRA raw): ";
+    for (int i = 0; i < 16 && (midOffset + i) < bufferSize; i++) {
+        std::cout << (int)debugBytes[midOffset + i] << " ";
+    }
+    std::cout << std::endl;
+
     // Convert BGRA to RGBA and remove row padding
     std::vector<uint8_t> rgbaData(width * height * 4);
     const uint8_t* src = static_cast<const uint8_t*>(mappedData);

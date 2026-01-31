@@ -549,7 +549,8 @@ public:
         // Track per-frame NativeFunction allocations for cleanup
         // Init-time functions (created before beginFrame) are NOT tracked
         // and persist for the lifetime of the engine
-        if (inFrame_) {
+        // Also skip tracking when suspended (for cached wrapper creation)
+        if (inFrame_ && !frameTrackingSuspended_) {
             frameNativeFunctions_.push_back(fnPtr);
         }
 
@@ -803,6 +804,14 @@ public:
         isolate_->SetIdle(true);
     }
 
+    void suspendFrameTracking() override {
+        frameTrackingSuspended_ = true;
+    }
+
+    void resumeFrameTracking() override {
+        frameTrackingSuspended_ = false;
+    }
+
     void registerRelease(JSValueHandle obj, std::function<void()> callback) override {
         v8::Isolate::Scope isolate_scope(isolate_);
         v8::HandleScope handle_scope(isolate_);
@@ -1041,6 +1050,13 @@ private:
 
         context->Global()->Set(context, v8::String::NewFromUtf8(isolate_, "setTimeout").ToLocalChecked(), setTimeoutFn).Check();
         context->Global()->Set(context, v8::String::NewFromUtf8(isolate_, "clearTimeout").ToLocalChecked(), clearTimeoutFn).Check();
+
+        // Intl stub (V8 was built without ICU, so Intl is not available)
+        // Libraries like PixiJS check for Intl?.Segmenter and fall back gracefully
+        v8::Local<v8::Object> intl = v8::Object::New(isolate_);
+        // Add empty Intl object so typeof Intl !== 'undefined'
+        // Note: Segmenter is intentionally not added so libraries fall back to alternatives
+        context->Global()->Set(context, v8::String::NewFromUtf8(isolate_, "Intl").ToLocalChecked(), intl).Check();
     }
 
     void reportException(v8::TryCatch& try_catch) {
@@ -1152,6 +1168,7 @@ private:
     std::unordered_set<v8::Persistent<v8::Value>*> frameHandles_;  // Handles to free at end of frame
     std::vector<NativeFunction*> frameNativeFunctions_;  // NativeFunction allocations to free at end of frame
     bool inFrame_ = false;  // True during animation frame execution
+    bool frameTrackingSuspended_ = false;  // When true, skip frame tracking for new allocations
 };
 
 // Factory function

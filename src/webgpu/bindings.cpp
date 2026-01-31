@@ -81,7 +81,7 @@ namespace mystral {
 namespace webgpu {
 
 // Verbose logging flag - set to true for debugging render pass operations
-static bool g_verboseLogging = false;
+static bool g_verboseLogging = true;  // Enable for debugging
 
 // Store references to WebGPU objects
 static WGPUDevice g_device = nullptr;
@@ -103,6 +103,9 @@ static bool g_contextConfigured = false;
 // Current frame's texture (refreshed each frame)
 static WGPUTexture g_currentTexture = nullptr;
 static WGPUTextureView g_currentTextureView = nullptr;
+// Track the texture that g_currentTextureView was created from
+// (needed for screenshot since g_currentTexture may change between createView and screenshot)
+static WGPUTexture g_currentViewSourceTexture = nullptr;
 
 // Screenshot support - persistent buffer for capturing frames
 static WGPUBuffer g_screenshotBuffer = nullptr;
@@ -114,6 +117,16 @@ static uint32_t g_screenshotBytesPerRow = 0;
 static WGPURenderPassEncoder g_jsRenderPass = nullptr;
 static WGPUComputePassEncoder g_jsComputePass = nullptr;
 static WGPUCommandEncoder g_jsCommandEncoder = nullptr;
+
+// Per-encoder render pass tracking (fixes issue with multiple encoders)
+// Maps command encoder pointer to its active render pass encoder
+static std::unordered_map<WGPUCommandEncoder, WGPURenderPassEncoder> g_encoderRenderPassMap;
+static std::unordered_map<WGPUCommandEncoder, WGPUComputePassEncoder> g_encoderComputePassMap;
+
+// Track whether the current frame's surface render pass has been ended
+// This prevents presenting the surface before its render commands are submitted
+static bool g_surfaceRenderPassEnded = false;
+static WGPUCommandEncoder g_surfaceRenderEncoder = nullptr;
 static bool g_screenshotPending = false;
 static bool g_screenshotReady = false;
 static std::vector<uint8_t> g_screenshotData;
@@ -482,6 +495,10 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                         std::cout << "[Canvas] Got texture: " << texture << std::endl;
                     }
 
+                    // Register in texture registry so createView can find it
+                    uint64_t textureId = g_nextTextureId++;
+                    g_textureRegistry[textureId] = {texture, g_surfaceFormat, g_canvasWidth, g_canvasHeight, 1, 1, WGPUTextureDimension_2D};
+
                     // Create JS wrapper for texture
                     auto jsTexture = g_engine->newObject();
                     g_engine->setPrivateData(jsTexture, texture);
@@ -493,18 +510,29 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
 
                     // texture.format
                     g_engine->setProperty(jsTexture, "format", g_engine->newString(formatToString(g_surfaceFormat)));
+                    g_engine->setProperty(jsTexture, "_textureId", g_engine->newNumber((double)textureId));
 
                     // texture.createView(descriptor?) -> GPUTextureView
+                    // Capture textureId to look up the correct texture (not g_currentTexture which may change)
                     g_engine->setProperty(jsTexture, "createView",
-                        g_engine->newFunction("createView", [](void* ctx, const std::vector<js::JSValueHandle>& args) {
-                            if (!g_currentTexture) {
+                        g_engine->newFunction("createView", [textureId](void* ctx, const std::vector<js::JSValueHandle>& args) {
+                            // Look up texture from registry using captured textureId
+                            auto it = g_textureRegistry.find(textureId);
+                            if (it == g_textureRegistry.end()) {
+                                std::cerr << "[WebGPU] Canvas createView: Texture " << textureId << " not found in registry" << std::endl;
+                                g_engine->throwException("Texture not found in registry");
+                                return g_engine->newUndefined();
+                            }
+
+                            WGPUTexture texture = it->second.texture;
+                            if (!texture) {
                                 g_engine->throwException("No current texture");
                                 return g_engine->newUndefined();
                             }
 
                             // Create texture view
                             WGPUTextureViewDescriptor viewDesc = {};
-                            viewDesc.format = g_surfaceFormat;
+                            viewDesc.format = it->second.format;
                             viewDesc.dimension = WGPUTextureViewDimension_2D;
                             viewDesc.baseMipLevel = 0;
                             viewDesc.mipLevelCount = 1;
@@ -512,9 +540,10 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                             viewDesc.arrayLayerCount = 1;
                             viewDesc.aspect = WGPUTextureAspect_All;
 
-                            WGPUTextureView view = wgpuTextureCreateView(g_currentTexture, &viewDesc);
+                            WGPUTextureView view = wgpuTextureCreateView(texture, &viewDesc);
 
                             g_currentTextureView = view;
+                            g_currentViewSourceTexture = texture;  // Track which texture the view was created from
 
                             // Create JS wrapper
                             auto jsView = g_engine->newObject();
@@ -527,8 +556,9 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
 
                     // texture.destroy()
                     g_engine->setProperty(jsTexture, "destroy",
-                        g_engine->newFunction("destroy", [](void* ctx, const std::vector<js::JSValueHandle>& args) {
-                            // Swapchain textures are managed by the surface, don't destroy
+                        g_engine->newFunction("destroy", [textureId](void* ctx, const std::vector<js::JSValueHandle>& args) {
+                            // Swapchain textures are managed by the surface, but remove from registry
+                            g_textureRegistry.erase(textureId);
                             return g_engine->newUndefined();
                         })
                     );
@@ -699,6 +729,10 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                         // Create GPUCanvasContext for offscreen canvas
                         // This shares the main surface/device for simplicity
                         std::cout << "[Canvas] Creating offscreen WebGPU context" << std::endl;
+
+                        // Suspend frame tracking - this context persists across frames
+                        g_engine->suspendFrameTracking();
+
                         auto canvasContext = g_engine->newObject();
 
                         // Store reference to our surface
@@ -741,6 +775,14 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                     return g_engine->newUndefined();
                                 }
                                 g_currentTexture = texture;
+                                std::cout << "[Canvas] Offscreen got texture: " << (void*)texture << std::endl;
+
+                                // Register in texture registry so createView can find it
+                                uint64_t textureId = g_nextTextureId++;
+                                g_textureRegistry[textureId] = {texture, g_surfaceFormat, g_canvasWidth, g_canvasHeight, 1, 1, WGPUTextureDimension_2D};
+
+                                // Suspend frame tracking for texture wrapper (persists until next frame)
+                                g_engine->suspendFrameTracking();
 
                                 // Create JS wrapper for texture
                                 auto jsTexture = g_engine->newObject();
@@ -753,17 +795,28 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
 
                                 // texture.format
                                 g_engine->setProperty(jsTexture, "format", g_engine->newString(formatToString(g_surfaceFormat)));
+                                g_engine->setProperty(jsTexture, "_textureId", g_engine->newNumber((double)textureId));
 
                                 // texture.createView(descriptor?) -> GPUTextureView
+                                // Capture textureId to look up the correct texture (not g_currentTexture which may change)
                                 g_engine->setProperty(jsTexture, "createView",
-                                    g_engine->newFunction("createView", [](void* c, const std::vector<js::JSValueHandle>& a) {
-                                        if (!g_currentTexture) {
+                                    g_engine->newFunction("createView", [textureId](void* c, const std::vector<js::JSValueHandle>& a) {
+                                        // Look up texture from registry using captured textureId
+                                        auto it = g_textureRegistry.find(textureId);
+                                        if (it == g_textureRegistry.end()) {
+                                            std::cerr << "[WebGPU] Offscreen createView: Texture " << textureId << " not found in registry" << std::endl;
+                                            g_engine->throwException("Texture not found in registry");
+                                            return g_engine->newUndefined();
+                                        }
+
+                                        WGPUTexture texture = it->second.texture;
+                                        if (!texture) {
                                             g_engine->throwException("No current texture");
                                             return g_engine->newUndefined();
                                         }
 
                                         WGPUTextureViewDescriptor viewDesc = {};
-                                        viewDesc.format = g_surfaceFormat;
+                                        viewDesc.format = it->second.format;
                                         viewDesc.dimension = WGPUTextureViewDimension_2D;
                                         viewDesc.baseMipLevel = 0;
                                         viewDesc.mipLevelCount = 1;
@@ -771,8 +824,11 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                         viewDesc.arrayLayerCount = 1;
                                         viewDesc.aspect = WGPUTextureAspect_All;
 
-                                        WGPUTextureView view = wgpuTextureCreateView(g_currentTexture, &viewDesc);
+                                        WGPUTextureView view = wgpuTextureCreateView(texture, &viewDesc);
                                         g_currentTextureView = view;
+                                        g_currentViewSourceTexture = texture;  // Track which texture the view was created from
+                                        std::cout << "[Canvas] Offscreen createView: texture=" << (void*)texture
+                                                  << ", view=" << (void*)view << std::endl;
 
                                         auto jsView = g_engine->newObject();
                                         g_engine->setPrivateData(jsView, view);
@@ -784,14 +840,22 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
 
                                 // texture.destroy()
                                 g_engine->setProperty(jsTexture, "destroy",
-                                    g_engine->newFunction("destroy", [](void* c, const std::vector<js::JSValueHandle>& a) {
+                                    g_engine->newFunction("destroy", [textureId](void* c, const std::vector<js::JSValueHandle>& a) {
+                                        // Swapchain textures are managed by the surface, but remove from registry
+                                        g_textureRegistry.erase(textureId);
                                         return g_engine->newUndefined();
                                     })
                                 );
 
+                                // Resume frame tracking for texture
+                                g_engine->resumeFrameTracking();
+
                                 return jsTexture;
                             })
                         );
+
+                        // Resume frame tracking
+                        g_engine->resumeFrameTracking();
 
                         return canvasContext;
                     }
@@ -932,20 +996,30 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                             }
 
                             // Submit user command buffers first
+                            static int submitCount = 0;
+                            submitCount++;
                             if (!cmdBuffers.empty() && g_queue) {
                                 wgpuQueueSubmit(g_queue, cmdBuffers.size(), cmdBuffers.data());
                                 // Release command buffers after submission (they're consumed by submit)
                                 for (auto cmdBuf : cmdBuffers) {
                                     wgpuCommandBufferRelease(cmdBuf);
                                 }
-                                if (g_verboseLogging) std::cout << "[WebGPU] Submitted " << cmdBuffers.size() << " command buffers" << std::endl;
+                                // Tick to flush GPU work
+                                wgpuDeviceTick(g_device);
+                                std::cout << "[WebGPU] Submit #" << submitCount << ": " << cmdBuffers.size() << " command buffers, g_currentTexture=" << (void*)g_currentTexture << std::endl;
                             } else {
-                                if (g_verboseLogging) std::cout << "[WebGPU] Submit: no buffers (length=" << length << ")" << std::endl;
+                                std::cout << "[WebGPU] Submit #" << submitCount << ": EMPTY (length=" << length << "), g_currentTexture=" << (void*)g_currentTexture << std::endl;
                             }
 
                             // Copy texture to screenshot buffer before presenting
                             // This must happen BEFORE present, while texture is still valid
-                            if (g_currentTexture && g_device && g_queue) {
+                            // Use g_currentViewSourceTexture (the texture the render view was created from)
+                            // to ensure we capture from the same texture that was rendered to
+                            WGPUTexture screenshotTexture = g_currentViewSourceTexture ? g_currentViewSourceTexture : g_currentTexture;
+                            std::cout << "[WebGPU] Screenshot copy check: viewSourceTex=" << (void*)g_currentViewSourceTexture
+                                      << ", currentTex=" << (void*)g_currentTexture
+                                      << ", using=" << (void*)screenshotTexture << std::endl;
+                            if (screenshotTexture && g_device && g_queue) {
                                 // Calculate buffer requirements
                                 uint32_t bytesPerPixel = 4;  // BGRA8
                                 uint32_t unalignedBytesPerRow = g_canvasWidth * bytesPerPixel;
@@ -974,7 +1048,7 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                 WGPUCommandEncoder copyEncoder = wgpuDeviceCreateCommandEncoder(g_device, &encDesc);
 
                                 WGPUImageCopyTexture_Compat srcCopy = {};
-                                srcCopy.texture = g_currentTexture;
+                                srcCopy.texture = screenshotTexture;
                                 srcCopy.mipLevel = 0;
                                 srcCopy.origin = {0, 0, 0};
                                 srcCopy.aspect = WGPUTextureAspect_All;
@@ -988,6 +1062,9 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                 WGPUExtent3D copySize = {g_canvasWidth, g_canvasHeight, 1};
                                 wgpuCommandEncoderCopyTextureToBuffer(copyEncoder, &srcCopy, &dstCopy, &copySize);
 
+                                std::cout << "[Screenshot] Copying from texture " << (void*)screenshotTexture
+                                          << " (format=" << g_surfaceFormat << ", size=" << g_canvasWidth << "x" << g_canvasHeight << ")" << std::endl;
+
                                 WGPUCommandBufferDescriptor cmdDesc = {};
                                 WGPUCommandBuffer copyCmd = wgpuCommandEncoderFinish(copyEncoder, &cmdDesc);
                                 wgpuQueueSubmit(g_queue, 1, &copyCmd);
@@ -995,13 +1072,33 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                 wgpuCommandBufferRelease(copyCmd);
                                 wgpuCommandEncoderRelease(copyEncoder);
 
+                                // Wait for GPU work to complete before present
+                                // This ensures the screenshot copy finishes before the texture is released
+                                for (int syncIter = 0; syncIter < 100; syncIter++) {
+                                    wgpuDeviceTick(g_device);
+                                    if (g_instance) {
+                                        wgpuInstanceProcessEvents(g_instance);
+                                    }
+                                }
+
                                 g_screenshotReady = true;
+                                std::cout << "[WebGPU] Screenshot copy submitted for texture " << (void*)screenshotTexture << " (" << g_canvasWidth << "x" << g_canvasHeight << ")" << std::endl;
+                            } else {
+                                std::cout << "[WebGPU] Screenshot copy SKIPPED: viewSourceTex=" << (void*)g_currentViewSourceTexture
+                                          << ", currentTex=" << (void*)g_currentTexture << ", device=" << (void*)g_device << std::endl;
                             }
 
-                            // Present the surface only if we have a current texture
-                            // (Multiple submits per frame should only present once)
-                            if (g_surface && g_currentTexture) {
+                            // Present the surface only if:
+                            // 1. We have a current texture
+                            // 2. The surface render pass has been ended (commands submitted)
+                            // This prevents presenting before the render commands are in this submit
+                            if (g_surface && g_currentTexture && g_surfaceRenderPassEnded) {
+                                std::cout << "[WebGPU] Presenting surface" << std::endl;
                                 wgpuSurfacePresent(g_surface);
+
+                                // Reset surface render tracking for next frame
+                                g_surfaceRenderEncoder = nullptr;
+                                g_surfaceRenderPassEnded = false;
 
                                 // Release the texture view if we created one
                                 if (g_currentTextureView) {
@@ -1009,8 +1106,9 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                     g_currentTextureView = nullptr;
                                 }
 
-                                // Null out the texture since it's now invalid after present
+                                // Null out the textures since they're now invalid after present
                                 g_currentTexture = nullptr;
+                                g_currentViewSourceTexture = nullptr;
                             }
 
                             return g_engine->newUndefined();
@@ -1595,6 +1693,13 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                             auto descriptor = args[0];
                             std::string code = g_engine->toString(g_engine->getProperty(descriptor, "code"));
 
+                            // Debug: Print first 500 chars of shader code
+                            if (code.length() > 0) {
+                                std::cout << "[Shader] Creating shader (" << code.length() << " chars):\n"
+                                          << code.substr(0, std::min((size_t)500, code.length()))
+                                          << (code.length() > 500 ? "\n..." : "") << std::endl;
+                            }
+
                             WGPUShaderModuleWGSLDescriptor_Compat wgslDesc = {};
                             WGPUShaderModuleDescriptor shaderDesc = {};
                             setupShaderModuleWGSL(&shaderDesc, &wgslDesc, code.c_str());
@@ -2118,32 +2223,36 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                             WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(g_device, &desc);
 
                             // Store in global for use by beginRenderPass
-                            // (This is a limitation - only one encoder at a time)
+                            // Note: Multiple encoders are supported via per-encoder render pass tracking
                             g_jsCommandEncoder = encoder;
+
+                            // Suspend frame tracking while creating encoder wrapper
+                            // This prevents the wrapper's methods from being garbage collected at frame end
+                            g_engine->suspendFrameTracking();
 
                             auto jsEncoder = g_engine->newObject();
                             g_engine->setPrivateData(jsEncoder, encoder);
 
+                            // Capture encoder pointer for use in closures
+                            WGPUCommandEncoder capturedEncoder = encoder;
+
                             // encoder.beginRenderPass(descriptor)
                             g_engine->setProperty(jsEncoder, "beginRenderPass",
-                                g_engine->newFunction("beginRenderPass", [](void* ctx, const std::vector<js::JSValueHandle>& args) {
+                                g_engine->newFunction("beginRenderPass", [capturedEncoder](void* ctx, const std::vector<js::JSValueHandle>& args) {
                                     if (args.empty()) {
                                         g_engine->throwException("beginRenderPass requires a descriptor");
                                         return g_engine->newUndefined();
                                     }
 
-                                    // Get encoder from closure - for now use static
-                                    // This is a limitation of the current callback system
-                                    // We'd need to store encoder reference somehow
+                                    // Use the captured encoder for this specific command encoder
+                                    WGPUCommandEncoder encoderToUse = capturedEncoder;
+                                    if (!encoderToUse) {
+                                        g_engine->throwException("Command encoder not available");
+                                        return g_engine->newUndefined();
+                                    }
 
                                     auto descriptor = args[0];
                                     auto colorAttachments = g_engine->getProperty(descriptor, "colorAttachments");
-
-                                    // Use the encoder from createCommandEncoder (stored in global)
-                                    if (!g_jsCommandEncoder) {
-                                        g_engine->throwException("No command encoder - call createCommandEncoder first");
-                                        return g_engine->newUndefined();
-                                    }
 
                                     // Parse all color attachments (deferred renderer uses multiple)
                                     auto attachmentsLengthProp = g_engine->getProperty(colorAttachments, "length");
@@ -2157,6 +2266,19 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                         auto attachment = g_engine->getPropertyIndex(colorAttachments, i);
                                         auto viewHandle = g_engine->getProperty(attachment, "view");
                                         WGPUTextureView view = (WGPUTextureView)g_engine->getPrivateData(viewHandle);
+
+                                        // Debug: Always log first color attachment for comparison with g_currentTextureView
+                                        if (i == 0) {
+                                            std::cout << "[WebGPU] Render pass attachment[0]: view=" << (void*)view
+                                                      << ", g_currentTextureView=" << (void*)g_currentTextureView
+                                                      << ", matches=" << (view == g_currentTextureView ? "YES" : "NO") << std::endl;
+
+                                            // Track if this render pass uses the surface texture
+                                            if (view == g_currentTextureView && g_currentTextureView != nullptr) {
+                                                g_surfaceRenderEncoder = encoderToUse;
+                                                g_surfaceRenderPassEnded = false;
+                                            }
+                                        }
 
                                         // Debug: Log GBuffer pass attachments
                                         if (numAttachments >= 5 && i == 0) {
@@ -2260,12 +2382,22 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                         if (g_verboseLogging) std::cout << "[WebGPU] Render pass with depth attachment, clear=" << depthStencilAttachment.depthClearValue << std::endl;
                                     }
 
-                                    // Begin render pass on the existing encoder
-                                    g_jsRenderPass = wgpuCommandEncoderBeginRenderPass(g_jsCommandEncoder, &renderPassDesc);
+                                    // Begin render pass on the captured encoder (not the global)
+                                    WGPURenderPassEncoder renderPass = wgpuCommandEncoderBeginRenderPass(encoderToUse, &renderPassDesc);
+
+                                    // Store in per-encoder map (fixes issue with multiple encoders)
+                                    g_encoderRenderPassMap[encoderToUse] = renderPass;
+
+                                    // Also set global for backwards compatibility with render pass methods
+                                    g_jsRenderPass = renderPass;
+
                                     if (g_verboseLogging) std::cout << "[WebGPU] Render pass started (" << numAttachments << " attachments), clear: (" << firstR << "," << firstG << "," << firstB << "," << firstA << ")" << std::endl;
 
+                                    // Suspend frame tracking while creating render pass wrapper
+                                    g_engine->suspendFrameTracking();
+
                                     auto jsRenderPass = g_engine->newObject();
-                                    g_engine->setPrivateData(jsRenderPass, g_jsRenderPass);
+                                    g_engine->setPrivateData(jsRenderPass, renderPass);
 
                                     // renderPass.setPipeline(pipeline)
                                     g_engine->setProperty(jsRenderPass, "setPipeline",
@@ -2499,18 +2631,35 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                         })
                                     );
 
-                                    // renderPass.end()
+                                    // renderPass.end() - capture encoder and render pass for cleanup
+                                    WGPUCommandEncoder capturedEncoderForEnd = encoderToUse;
+                                    WGPURenderPassEncoder capturedRenderPass = renderPass;
                                     g_engine->setProperty(jsRenderPass, "end",
-                                        g_engine->newFunction("end", [](void* ctx, const std::vector<js::JSValueHandle>& args) {
-                                            if (g_jsRenderPass) {
-                                                wgpuRenderPassEncoderEnd(g_jsRenderPass);
-                                                wgpuRenderPassEncoderRelease(g_jsRenderPass);
-                                                g_jsRenderPass = nullptr;
+                                        g_engine->newFunction("end", [capturedEncoderForEnd, capturedRenderPass](void* ctx, const std::vector<js::JSValueHandle>& args) {
+                                            if (capturedRenderPass) {
+                                                wgpuRenderPassEncoderEnd(capturedRenderPass);
+                                                wgpuRenderPassEncoderRelease(capturedRenderPass);
+
+                                                // Remove from per-encoder map
+                                                g_encoderRenderPassMap.erase(capturedEncoderForEnd);
+
+                                                // Clear global if it matches
+                                                if (g_jsRenderPass == capturedRenderPass) {
+                                                    g_jsRenderPass = nullptr;
+                                                }
+
+                                                // Mark surface render pass as ended
+                                                if (g_surfaceRenderEncoder == capturedEncoderForEnd) {
+                                                    g_surfaceRenderPassEnded = true;
+                                                }
                                                 if (g_verboseLogging) std::cout << "[WebGPU] Render pass ended" << std::endl;
                                             }
                                             return g_engine->newUndefined();
                                         })
                                     );
+
+                                    // Resume frame tracking
+                                    g_engine->resumeFrameTracking();
 
                                     return jsRenderPass;
                                 })
@@ -2807,14 +2956,58 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
 
                             // encoder.finish(descriptor?)
                             g_engine->setProperty(jsEncoder, "finish",
-                                g_engine->newFunction("finish", [](void* ctx, const std::vector<js::JSValueHandle>& args) {
+                                g_engine->newFunction("finish", [capturedEncoder](void* ctx, const std::vector<js::JSValueHandle>& args) {
+                                    // Use captured encoder for this specific command encoder
+                                    WGPUCommandEncoder encoderToFinish = capturedEncoder;
+
+                                    // Auto-end any active render/compute passes for THIS encoder
+                                    // Look up from per-encoder map, not global
+                                    auto renderPassIt = g_encoderRenderPassMap.find(encoderToFinish);
+                                    if (renderPassIt != g_encoderRenderPassMap.end() && renderPassIt->second) {
+                                        WGPURenderPassEncoder renderPass = renderPassIt->second;
+                                        std::cout << "[WebGPU] Auto-ending render pass (pass=" << (void*)renderPass << ", encoder=" << (void*)encoderToFinish << ")" << std::endl;
+                                        wgpuRenderPassEncoderEnd(renderPass);
+                                        wgpuRenderPassEncoderRelease(renderPass);
+                                        g_encoderRenderPassMap.erase(renderPassIt);
+
+                                        // Clear global if it matches
+                                        if (g_jsRenderPass == renderPass) {
+                                            g_jsRenderPass = nullptr;
+                                        }
+
+                                        // Mark surface render pass as ended
+                                        if (g_surfaceRenderEncoder == encoderToFinish) {
+                                            g_surfaceRenderPassEnded = true;
+                                            std::cout << "[WebGPU] Surface render pass auto-ended (encoder=" << (void*)encoderToFinish << ")" << std::endl;
+                                        }
+                                    }
+
+                                    auto computePassIt = g_encoderComputePassMap.find(encoderToFinish);
+                                    if (computePassIt != g_encoderComputePassMap.end() && computePassIt->second) {
+                                        WGPUComputePassEncoder computePass = computePassIt->second;
+                                        std::cout << "[WebGPU] Auto-ending compute pass (pass=" << (void*)computePass << ", encoder=" << (void*)encoderToFinish << ")" << std::endl;
+                                        wgpuComputePassEncoderEnd(computePass);
+                                        wgpuComputePassEncoderRelease(computePass);
+                                        g_encoderComputePassMap.erase(computePassIt);
+
+                                        // Clear global if it matches
+                                        if (g_jsComputePass == computePass) {
+                                            g_jsComputePass = nullptr;
+                                        }
+                                    }
+
                                     WGPUCommandBufferDescriptor cmdDesc = {};
                                     WGPUCommandBuffer cmdBuffer = nullptr;
 
-                                    if (g_jsCommandEncoder) {
-                                        cmdBuffer = wgpuCommandEncoderFinish(g_jsCommandEncoder, &cmdDesc);
-                                        wgpuCommandEncoderRelease(g_jsCommandEncoder);
-                                        g_jsCommandEncoder = nullptr;
+                                    if (encoderToFinish) {
+                                        cmdBuffer = wgpuCommandEncoderFinish(encoderToFinish, &cmdDesc);
+                                        wgpuCommandEncoderRelease(encoderToFinish);
+
+                                        // Clear global if it matches
+                                        if (g_jsCommandEncoder == encoderToFinish) {
+                                            g_jsCommandEncoder = nullptr;
+                                        }
+
                                         if (g_verboseLogging) std::cout << "[WebGPU] Command encoder finished, buffer: " << cmdBuffer << std::endl;
                                     }
 
@@ -2824,6 +3017,9 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                     return jsCommandBuffer;
                                 })
                             );
+
+                            // Resume frame tracking now that encoder wrapper is created
+                            g_engine->resumeFrameTracking();
 
                             return jsEncoder;
                         })

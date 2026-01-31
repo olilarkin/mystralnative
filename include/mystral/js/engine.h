@@ -253,6 +253,19 @@ public:
     virtual void clearFrameHandles() {}
 
     /**
+     * Temporarily suspend frame allocation tracking.
+     * Functions created while suspended won't be deleted at frame end.
+     * Use for creating cached wrapper objects that should persist across frames.
+     * Call resumeFrameTracking() to re-enable tracking.
+     */
+    virtual void suspendFrameTracking() {}
+
+    /**
+     * Resume frame allocation tracking after a suspend.
+     */
+    virtual void resumeFrameTracking() {}
+
+    /**
      * Register a release callback on a JS object wrapper.
      * When the JS object is garbage collected (no more JS references),
      * the callback fires to release the associated native resource.

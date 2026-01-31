@@ -179,6 +179,11 @@ npm install three@0.182.0
 npx esbuild examples/threejs-cube-src.js --bundle --outfile=threejs-bundle.js --format=esm --platform=browser
 mystral run threejs-bundle.js
 
+# PixiJS v8 WebGPU (requires bundling, WebGPU renderer only)
+npm install pixi.js@^8.0.0
+npx esbuild examples/pixijs-sprite-src.js --bundle --outfile=pixijs-bundle.js --format=esm --platform=browser
+mystral run pixijs-bundle.js
+
 # Custom window size
 mystral run examples/simple-cube.js --width 1920 --height 1080
 
@@ -200,6 +205,8 @@ mystral run examples/simple-cube.js --headless --screenshot output.png
 | `mystral-helmet.js` | Full Mystral Engine with DamagedHelmet model |
 | `daynight.js` | Day/night cycle with atmosphere, stars, moon, torches |
 | `sponza.js` | Sponza palace with day/night cycle, torches, fireflies |
+| `threejs-cube-src.js` | Three.js WebGPU example (requires bundling) |
+| `pixijs-sprite-src.js` | PixiJS v8 WebGPU example (requires bundling) |
 
 ## Bundling for Distribution
 
@@ -374,6 +381,7 @@ Prebuilt dependency binaries are managed via [mystralengine/library-builder](htt
 Full documentation is available at [mystralengine.github.io/mystralnative](https://mystralengine.github.io/mystralnative/).
 
 - [Three.js WebGPU Guide](https://mystralengine.github.io/mystralnative/docs/guides/threejs) - Using Three.js with MystralNative
+- [PixiJS v8 WebGPU Guide](https://mystralengine.github.io/mystralnative/docs/guides/pixijs) - Using PixiJS v8 with MystralNative (WebGPU renderer only)
 - [CLI Reference](https://mystralengine.github.io/mystralnative/docs/api/cli) - Command line options
 - [Building from Source](https://mystralengine.github.io/mystralnative/docs/guides/building) - Build configuration options
 

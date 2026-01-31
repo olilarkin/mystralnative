@@ -1,0 +1,273 @@
+# PixiJS v8 WebGPU
+
+Learn how to use PixiJS v8 with its WebGPU renderer in Mystral Native.js.
+
+<img src="/mystralnative/pixijs-sprite.png" alt="PixiJS Sprite Example" style={{maxWidth: '600px', borderRadius: '8px', margin: '20px 0'}} />
+
+## Requirements
+
+- Mystral Native.js v0.1.0 or later (V8 + Dawn recommended)
+- Node.js (for bundling)
+- pixi.js v8.0.0 or later
+
+## Important: WebGPU Renderer Only
+
+**MystralNative only supports PixiJS's WebGPU renderer.** The WebGL renderer is not available.
+
+When initializing your PixiJS application, you **must** set `preference: 'webgpu'`:
+
+```javascript
+const app = new Application();
+await app.init({
+  preference: 'webgpu', // REQUIRED for MystralNative
+  // ... other options
+});
+```
+
+## Quick Start
+
+### 1. Install PixiJS
+
+```bash
+npm install pixi.js@^8.0.0
+```
+
+### 2. Create Your Script
+
+Create a file called `my-pixijs-app.js`:
+
+```javascript
+import { Application, Graphics, Sprite } from 'pixi.js';
+
+async function main() {
+  // Create application with WebGPU renderer
+  const app = new Application();
+
+  await app.init({
+    width: 800,
+    height: 600,
+    backgroundColor: 0x1099bb,
+    preference: 'webgpu', // REQUIRED: MystralNative only supports WebGPU
+  });
+
+  // Add canvas to document
+  document.body.appendChild(app.canvas);
+
+  // Create a red rectangle using Graphics
+  const graphics = new Graphics();
+  graphics.rect(100, 100, 200, 150);
+  graphics.fill(0xff0000);
+  app.stage.addChild(graphics);
+
+  // Create a green circle
+  const circle = new Graphics();
+  circle.circle(500, 300, 80);
+  circle.fill(0x00ff00);
+  app.stage.addChild(circle);
+
+  // Animation loop
+  let elapsed = 0;
+  app.ticker.add((ticker) => {
+    elapsed += ticker.deltaTime;
+    graphics.rotation = elapsed * 0.01;
+    graphics.pivot.set(100, 75);
+    graphics.x = 200;
+    graphics.y = 175;
+  });
+
+  console.log('PixiJS WebGPU running!');
+}
+
+main().catch(console.error);
+```
+
+### 3. Bundle Your Script
+
+PixiJS uses ES modules and must be bundled before running with Mystral Native.js. Use esbuild:
+
+```bash
+# Install esbuild if you don't have it
+npm install -D esbuild
+
+# Bundle your script
+npx esbuild my-pixijs-app.js \
+  --bundle \
+  --outfile=my-pixijs-bundle.js \
+  --format=esm \
+  --platform=browser
+```
+
+### 4. Run with Mystral Native.js
+
+```bash
+mystral run my-pixijs-bundle.js
+```
+
+You should see a rotating red rectangle and a green circle on a teal background!
+
+## Using the Included Example
+
+The release includes a complete example at `examples/pixijs-sprite-src.js`:
+
+```bash
+# From the mystral installation directory
+npm install pixi.js@^8.0.0
+
+npx esbuild examples/pixijs-sprite-src.js \
+  --bundle \
+  --outfile=pixijs-bundle.js \
+  --format=esm \
+  --platform=browser
+
+mystral run pixijs-bundle.js
+```
+
+## Sprites and Textures
+
+PixiJS sprites work by generating textures from Graphics objects:
+
+```javascript
+import { Application, Graphics, Sprite } from 'pixi.js';
+
+// Create graphics for texture
+const graphics = new Graphics();
+graphics.rect(0, 0, 64, 64);
+graphics.fill(0xff6600);
+graphics.circle(32, 32, 20);
+graphics.fill(0x0066ff);
+
+// Generate texture from graphics
+const texture = app.renderer.generateTexture(graphics);
+
+// Create sprites from the texture
+for (let i = 0; i < 10; i++) {
+  const sprite = new Sprite(texture);
+  sprite.x = 50 + i * 70;
+  sprite.y = 100;
+  sprite.anchor.set(0.5);
+  app.stage.addChild(sprite);
+}
+```
+
+## Key Differences from Browser
+
+When using PixiJS with Mystral Native.js:
+
+| Browser | Mystral Native.js |
+|---------|-------------------|
+| WebGL or WebGPU | **WebGPU only** (`preference: 'webgpu'`) |
+| Run directly in browser | Bundle first, then run |
+| Auto-detects renderer | Must specify `preference: 'webgpu'` |
+
+## Supported Features
+
+The following PixiJS features have been tested:
+
+- **Renderer**: WebGPU renderer only (`preference: 'webgpu'`)
+- **Graphics**: Rectangles, circles, ellipses, fills
+- **Sprites**: From generated textures
+- **Containers**: Grouping and nesting
+- **Animation**: Ticker-based animation loops
+- **Transforms**: Position, rotation, scale, anchor, pivot
+
+## Troubleshooting
+
+### Black Screen
+
+If you see a black screen:
+
+1. Ensure you have `preference: 'webgpu'` set in `app.init()`
+2. Make sure you're using Mystral Native.js v0.1.0+ with V8 + Dawn backend
+3. Check the console for errors
+4. Verify you're using PixiJS v8.x (not v7 or earlier)
+
+### "Renderer type is 1 (WebGL)"
+
+If PixiJS falls back to WebGL, it will not work. Ensure:
+1. You have `preference: 'webgpu'` (not `'webgl'` or omitted)
+2. You're using a Dawn build of MystralNative
+
+### Module Resolution Errors
+
+If esbuild can't find modules:
+- Run from the directory containing `node_modules`
+- Check that pixi.js is installed correctly: `npm install pixi.js@^8.0.0`
+
+### Blank Screenshot
+
+If screenshots are blank but the window renders correctly:
+- This was fixed in MystralNative v0.1.0+
+- Ensure you're using the latest version
+
+## Performance Tips
+
+```javascript
+// These settings work well for MystralNative
+const app = new Application();
+await app.init({
+  preference: 'webgpu',
+  antialias: false,      // Better performance
+  resolution: 1,         // Avoid unnecessary scaling
+  autoDensity: false,
+});
+```
+
+The **V8 + Dawn** configuration provides the best PixiJS compatibility and performance.
+
+## Version Compatibility
+
+| Mystral Native.js | PixiJS | Status |
+|-------------------|--------|--------|
+| v0.1.0+           | 8.x    | ✅ Tested |
+| v0.1.0+           | 7.x    | ❌ Not supported (no WebGPU) |
+
+## Example: Complete Animated Scene
+
+Here's a complete example with multiple animated elements:
+
+```javascript
+import { Application, Graphics, Sprite, Container } from 'pixi.js';
+
+async function main() {
+  const app = new Application();
+  await app.init({
+    width: 800,
+    height: 600,
+    backgroundColor: 0x1099bb,
+    preference: 'webgpu',
+  });
+  document.body.appendChild(app.canvas);
+
+  // Create a bouncing ball
+  const ball = new Graphics();
+  ball.circle(0, 0, 30);
+  ball.fill(0xff0000);
+  ball.x = 400;
+  ball.y = 300;
+  app.stage.addChild(ball);
+
+  // Animation
+  let velocityY = 0;
+  const gravity = 0.5;
+  const bounce = -0.8;
+
+  app.ticker.add(() => {
+    velocityY += gravity;
+    ball.y += velocityY;
+
+    // Bounce off bottom
+    if (ball.y > 570) {
+      ball.y = 570;
+      velocityY *= bounce;
+    }
+  });
+}
+
+main().catch(console.error);
+```
+
+## Next Steps
+
+- [Running Games](/mystralnative/docs/guides/running-games) - More CLI options
+- [Three.js Guide](/mystralnative/docs/guides/threejs) - Using Three.js with MystralNative
+- [PixiJS Documentation](https://pixijs.download/v8.x/docs/index.html) - Official PixiJS v8 docs
