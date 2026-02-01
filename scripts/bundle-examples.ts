@@ -28,6 +28,7 @@ const EXAMPLES: Array<{ source: string; output: string; dir?: string }> = [
   { source: "sponza-native.ts", output: "sponza.js" },
   { source: "main.ts", output: "pixi-test.js", dir: PIXI_TEST_DIR },
   { source: "threejs-rt-shadows.ts", output: "threejs-rt-shadows.js", dir: THREEJS_RT_DIR },
+  { source: "threejs-rt-hardware.ts", output: "threejs-rt-hardware.js", dir: THREEJS_RT_DIR },
 ];
 
 async function bundleExample(example: { source: string; output: string; dir?: string }): Promise<boolean> {

@@ -1909,6 +1909,59 @@ class AmbientLight extends Light {
   }
 }
 
+// ../../src/core/ui/StyleParser.ts
+function parseNumericValue(value) {
+  if (typeof value === "number") {
+    return value;
+  }
+  const trimmed = value.trim();
+  if (trimmed.endsWith("px")) {
+    return parseFloat(trimmed.slice(0, -2));
+  }
+  if (trimmed.endsWith("rem")) {
+    return parseFloat(trimmed.slice(0, -3)) * 16;
+  }
+  if (trimmed.endsWith("em")) {
+    return parseFloat(trimmed.slice(0, -2)) * 16;
+  }
+  const num = parseFloat(trimmed);
+  return isNaN(num) ? 0 : num;
+}
+function parseBoxValues(value) {
+  if (value === undefined) {
+    return { top: 0, right: 0, bottom: 0, left: 0 };
+  }
+  if (typeof value === "number") {
+    return { top: value, right: value, bottom: value, left: value };
+  }
+  if (typeof value === "object") {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parts = value.trim().split(/\s+/).map(parseNumericValue);
+    switch (parts.length) {
+      case 1:
+        return { top: parts[0], right: parts[0], bottom: parts[0], left: parts[0] };
+      case 2:
+        return { top: parts[0], right: parts[1], bottom: parts[0], left: parts[1] };
+      case 3:
+        return { top: parts[0], right: parts[1], bottom: parts[2], left: parts[1] };
+      case 4:
+        return { top: parts[0], right: parts[1], bottom: parts[2], left: parts[3] };
+      default:
+        console.warn(`Invalid box value format: "${value}". Expected 1-4 values.`);
+        return { top: 0, right: 0, bottom: 0, left: 0 };
+    }
+  }
+  return { top: 0, right: 0, bottom: 0, left: 0 };
+}
+function parseGap(value) {
+  if (value === undefined) {
+    return 0;
+  }
+  return parseNumericValue(value);
+}
+
 // ../../src/core/ui/UIElement.ts
 class UIElement {
   id = "";
@@ -1935,6 +1988,11 @@ class UIElement {
   constructor(style) {
     if (style) {
       this.style = { ...style };
+      const hasNonDefaultAnchor = style.anchor && style.anchor !== "top-left";
+      const hasPivot = style.pivot !== undefined;
+      if ((hasNonDefaultAnchor || hasPivot) && !style.position) {
+        this.style.position = "absolute";
+      }
     }
     this.id = `ui_${Math.random().toString(36).substr(2, 9)}`;
   }
@@ -2007,18 +2065,10 @@ class UIElement {
     }
   }
   getPadding() {
-    const p = this.style.padding ?? 0;
-    if (typeof p === "number") {
-      return { top: p, right: p, bottom: p, left: p };
-    }
-    return p;
+    return parseBoxValues(this.style.padding);
   }
   getMargin() {
-    const m = this.style.margin ?? 0;
-    if (typeof m === "number") {
-      return { top: m, right: m, bottom: m, left: m };
-    }
-    return m;
+    return parseBoxValues(this.style.margin);
   }
   resolveSize(value, parentSize, contentSize) {
     if (value === undefined || value === "auto") {
@@ -2049,9 +2099,26 @@ class UIElement {
     }
     return defaultValue;
   }
+  getDefaultPivotForAnchor(anchor) {
+    let x = 0;
+    if (anchor.includes("center") && !anchor.includes("center-left") && !anchor.includes("center-right")) {
+      x = 0.5;
+    } else if (anchor.endsWith("-center")) {
+      x = 0.5;
+    } else if (anchor.includes("right")) {
+      x = 1;
+    }
+    let y = 0;
+    if (anchor.startsWith("center")) {
+      y = 0.5;
+    } else if (anchor.includes("bottom")) {
+      y = 1;
+    }
+    return { x, y };
+  }
   layout(parentBounds, screenWidth, screenHeight) {
     const anchor = this.style.anchor ?? "top-left";
-    const pivot = this.style.pivot ?? { x: 0, y: 0 };
+    const pivot = this.style.pivot ?? this.getDefaultPivotForAnchor(anchor);
     let width = this.resolveSize(this.style.width, parentBounds.width, this._contentSize.width);
     let height = this.resolveSize(this.style.height, parentBounds.height, this._contentSize.height);
     const minW = this.resolveValue(this.style.minWidth, parentBounds.width, 0);
@@ -2213,13 +2280,14 @@ class UIElement {
       child.update(dt);
     }
   }
-  collectRenderData(data, parentZIndex = 0) {
+  collectRenderData(data, parentZIndex = 0, parentRenderLayer = 0) {
     if (!this.visible)
       return;
     const effectiveZIndex = parentZIndex + (this.style.zIndex ?? 0);
-    this.getRenderData(data, effectiveZIndex);
+    const effectiveRenderLayer = this.style.renderLayer ?? parentRenderLayer;
+    this.getRenderData(data, effectiveZIndex, effectiveRenderLayer);
     for (const child of this.children) {
-      child.collectRenderData(data, effectiveZIndex);
+      child.collectRenderData(data, effectiveZIndex, effectiveRenderLayer);
     }
   }
   destroy() {
@@ -2267,11 +2335,23 @@ class Label extends UIElement {
     }
     return Label.metricsContext;
   }
-  wrapText(text, maxWidth, fontSize, fontFamily) {
+  resolveFontWeight(weight) {
+    if (weight === undefined || weight === "normal")
+      return "400";
+    if (weight === "medium")
+      return "500";
+    if (weight === "bold")
+      return "700";
+    if (typeof weight === "number")
+      return String(weight);
+    return "400";
+  }
+  wrapText(text, maxWidth, fontSize, fontFamily, fontWeight) {
     if (!text)
       return [];
     const ctx = this.getMetricsContext();
-    ctx.font = `${fontSize}px ${fontFamily}`;
+    const weight = this.resolveFontWeight(fontWeight);
+    ctx.font = `${weight} ${fontSize}px ${fontFamily}`;
     const lines = [];
     const paragraphs = text.split(`
 `);
@@ -2297,11 +2377,13 @@ class Label extends UIElement {
   measureContent() {
     const fontSize = this.style.fontSize ?? 16;
     const fontFamily = this.style.fontFamily ?? "sans-serif";
-    const lineHeight = this.style.lineHeight ?? fontSize * 1.4;
+    const fontWeight = this.style.fontWeight;
+    const lineHeightMultiplier = this.style.lineHeight ?? 1.4;
+    const lineHeight = fontSize * lineHeightMultiplier;
     const wordWrap = this.style.wordWrap ?? false;
     const maxWidth = typeof this.style.width === "number" ? this.style.width : Infinity;
     if (wordWrap && maxWidth < Infinity) {
-      this._lines = this.wrapText(this._text, maxWidth, fontSize, fontFamily);
+      this._lines = this.wrapText(this._text, maxWidth, fontSize, fontFamily, fontWeight);
     } else {
       this._lines = this._text.split(`
 `);
@@ -2315,7 +2397,8 @@ class Label extends UIElement {
     }
     let maxLineWidth = 0;
     const ctx = this.getMetricsContext();
-    ctx.font = `${fontSize}px ${fontFamily}`;
+    const weight = this.resolveFontWeight(fontWeight);
+    ctx.font = `${weight} ${fontSize}px ${fontFamily}`;
     for (const line of this._lines) {
       const metrics = ctx.measureText(line);
       maxLineWidth = Math.max(maxLineWidth, metrics.width);
@@ -2329,9 +2412,9 @@ class Label extends UIElement {
     };
     return this._contentSize;
   }
-  getRenderData(data, baseZIndex) {
+  getRenderData(data, baseZIndex, inheritedRenderLayer = 0) {
     const opacity = this.style.opacity ?? 1;
-    const renderLayer = this.style.renderLayer ?? 0;
+    const renderLayer = this.style.renderLayer ?? inheritedRenderLayer;
     if (opacity <= 0)
       return;
     if (this.style.backgroundColor) {
@@ -2353,48 +2436,472 @@ class Label extends UIElement {
         width: this._bounds.width - padding.left - padding.right,
         height: this._bounds.height - padding.top - padding.bottom
       };
+      const displayText = this._lines.length > 0 ? this._lines.join(`
+`) : this._text;
       data.push({
         type: "text",
         bounds: textBounds,
         zIndex: baseZIndex + 0.1,
         renderLayer,
-        text: this._text,
+        text: displayText,
         color: this.style.color ?? "#ffffff",
         fontSize: this.style.fontSize ?? 16,
         fontFamily: this.style.fontFamily ?? "sans-serif",
         textAlign: this.style.textAlign ?? "left",
-        textAlpha: opacity
+        textAlpha: opacity,
+        letterSpacing: this.style.letterSpacing,
+        lineHeight: this.style.lineHeight,
+        fontWeight: this.style.fontWeight,
+        labelShadow: this.style.labelShadow,
+        labelOutline: this.style.labelOutline
       });
     }
   }
 }
 
+// ../../src/core/ui/easing.ts
+function linear(t) {
+  return t;
+}
+function ease(t) {
+  return cubicBezier(0.25, 0.1, 0.25, 1, t);
+}
+function easeIn(t) {
+  return t * t;
+}
+function easeOut(t) {
+  return 1 - (1 - t) * (1 - t);
+}
+function easeInOut(t) {
+  return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+}
+function spring(t) {
+  const c4 = 2 * Math.PI / 3;
+  if (t === 0)
+    return 0;
+  if (t === 1)
+    return 1;
+  return Math.pow(2, -10 * t) * Math.sin((t * 10 - 0.75) * c4) + 1;
+}
+function getEasingFunction(type) {
+  switch (type) {
+    case "linear":
+      return linear;
+    case "ease":
+      return ease;
+    case "ease-in":
+      return easeIn;
+    case "ease-out":
+      return easeOut;
+    case "ease-in-out":
+      return easeInOut;
+    case "spring":
+      return spring;
+    default:
+      return linear;
+  }
+}
+function cubicBezier(x1, y1, x2, y2, t) {
+  if (t <= 0)
+    return 0;
+  if (t >= 1)
+    return 1;
+  const cx = 3 * x1;
+  const bx = 3 * (x2 - x1) - cx;
+  const ax = 1 - cx - bx;
+  const cy = 3 * y1;
+  const by = 3 * (y2 - y1) - cy;
+  const ay = 1 - cy - by;
+  const sampleCurveX = (t2) => ((ax * t2 + bx) * t2 + cx) * t2;
+  const sampleCurveY = (t2) => ((ay * t2 + by) * t2 + cy) * t2;
+  const sampleCurveDerivativeX = (t2) => (3 * ax * t2 + 2 * bx) * t2 + cx;
+  let guessT = t;
+  for (let i = 0;i < 8; i++) {
+    const currentX = sampleCurveX(guessT) - t;
+    if (Math.abs(currentX) < 0.000001)
+      break;
+    const derivative = sampleCurveDerivativeX(guessT);
+    if (Math.abs(derivative) < 0.000001)
+      break;
+    guessT -= currentX / derivative;
+  }
+  guessT = Math.max(0, Math.min(1, guessT));
+  return sampleCurveY(guessT);
+}
+function interpolateColor(from, to, t, easing = "linear") {
+  const easedT = getEasingFunction(easing)(t);
+  const fromRgba = parseColorToRgba(from);
+  const toRgba = parseColorToRgba(to);
+  const r = Math.round(fromRgba.r + (toRgba.r - fromRgba.r) * easedT);
+  const g = Math.round(fromRgba.g + (toRgba.g - fromRgba.g) * easedT);
+  const b = Math.round(fromRgba.b + (toRgba.b - fromRgba.b) * easedT);
+  const a = fromRgba.a + (toRgba.a - fromRgba.a) * easedT;
+  return `rgba(${r}, ${g}, ${b}, ${a.toFixed(3)})`;
+}
+function parseColorToRgba(color) {
+  if (color.startsWith("rgba(")) {
+    const match = color.match(/rgba\((\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\)/);
+    if (match) {
+      return {
+        r: parseInt(match[1]),
+        g: parseInt(match[2]),
+        b: parseInt(match[3]),
+        a: parseFloat(match[4])
+      };
+    }
+  }
+  if (color.startsWith("rgb(")) {
+    const match = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+    if (match) {
+      return {
+        r: parseInt(match[1]),
+        g: parseInt(match[2]),
+        b: parseInt(match[3]),
+        a: 1
+      };
+    }
+  }
+  if (color.startsWith("#")) {
+    let hex = color.slice(1);
+    if (hex.length === 3) {
+      hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
+    } else if (hex.length === 4) {
+      hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2] + hex[3] + hex[3];
+    }
+    const r = parseInt(hex.slice(0, 2), 16);
+    const g = parseInt(hex.slice(2, 4), 16);
+    const b = parseInt(hex.slice(4, 6), 16);
+    const a = hex.length === 8 ? parseInt(hex.slice(6, 8), 16) / 255 : 1;
+    return { r, g, b, a };
+  }
+  return { r: 0, g: 0, b: 0, a: 0 };
+}
+
+// ../../src/core/ui/UIAnimator.ts
+class UIAnimatorClass {
+  animations = new Map;
+  animatedStyles = new Map;
+  frameId = null;
+  lastTime = 0;
+  autoUpdateRunning = false;
+  pulseAnimations = new Map;
+  staggerAnimations = new Map;
+  animate(element, property, from, to, options) {
+    const key = this.getAnimationKey(element, property);
+    this.animations.delete(key);
+    const animation = {
+      element,
+      property,
+      from,
+      to,
+      duration: options.duration,
+      easing: options.easing ?? "ease-out",
+      elapsed: 0,
+      delay: options.delay ?? 0,
+      onComplete: options.onComplete
+    };
+    this.animations.set(key, animation);
+    this.startAutoUpdate();
+  }
+  transition(element, property, from, to, transition) {
+    if (transition.property !== "all" && transition.property !== property) {
+      return;
+    }
+    if (from === to) {
+      return;
+    }
+    this.animate(element, property, from, to, {
+      duration: transition.duration,
+      easing: transition.easing ?? "ease-out",
+      delay: transition.delay ?? 0
+    });
+  }
+  update(deltaTime) {
+    const hasPropertyAnimations = this.animations.size > 0;
+    const hasPulseAnimations = this.pulseAnimations.size > 0;
+    const hasStaggerAnimations = this.staggerAnimations.size > 0;
+    if (!hasPropertyAnimations && !hasPulseAnimations && !hasStaggerAnimations) {
+      return;
+    }
+    if (hasPropertyAnimations) {
+      const completedKeys = [];
+      for (const [key, anim] of this.animations) {
+        if (anim.delay > 0) {
+          anim.delay -= deltaTime;
+          if (anim.delay > 0) {
+            this.updateAnimatedStyle(anim.element, anim.property, anim.from);
+            continue;
+          }
+          anim.elapsed = -anim.delay;
+          anim.delay = 0;
+        }
+        anim.elapsed += deltaTime;
+        const progress = Math.min(1, anim.elapsed / anim.duration);
+        const easedProgress = getEasingFunction(anim.easing)(progress);
+        const currentValue = this.interpolateValue(anim.from, anim.to, easedProgress);
+        this.updateAnimatedStyle(anim.element, anim.property, currentValue);
+        anim.element.markDirty();
+        if (progress >= 1) {
+          completedKeys.push(key);
+          anim.onComplete?.();
+        }
+      }
+      for (const key of completedKeys) {
+        this.animations.delete(key);
+      }
+    }
+    for (const pulse of this.pulseAnimations.values()) {
+      if (pulse.active) {
+        pulse.elapsed += deltaTime;
+      }
+    }
+    const completedStaggers = [];
+    for (const [key, stagger] of this.staggerAnimations) {
+      if (stagger.active) {
+        stagger.elapsed += deltaTime;
+        const totalDuration = (stagger.itemCount - 1) * stagger.options.delay + stagger.options.duration;
+        if (stagger.elapsed >= totalDuration) {
+          completedStaggers.push(key);
+        }
+      }
+    }
+    for (const key of completedStaggers) {
+      this.staggerAnimations.delete(key);
+    }
+    if (this.animations.size === 0 && this.pulseAnimations.size === 0 && this.staggerAnimations.size === 0) {
+      this.stopAutoUpdate();
+    }
+  }
+  cancelAll(element) {
+    const prefix = `${element.id}_`;
+    const keysToRemove = [];
+    for (const key of this.animations.keys()) {
+      if (key.startsWith(prefix)) {
+        keysToRemove.push(key);
+      }
+    }
+    for (const key of keysToRemove) {
+      this.animations.delete(key);
+    }
+    this.animatedStyles.delete(element.id);
+  }
+  cancel(element, property) {
+    const key = this.getAnimationKey(element, property);
+    this.animations.delete(key);
+  }
+  getAnimatedStyle(element) {
+    return this.animatedStyles.get(element.id);
+  }
+  hasActiveAnimations(element) {
+    const prefix = `${element.id}_`;
+    for (const key of this.animations.keys()) {
+      if (key.startsWith(prefix)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  getAnimatedValue(element, property, styleValue) {
+    const animStyle = this.animatedStyles.get(element.id);
+    if (animStyle && property in animStyle) {
+      return animStyle[property];
+    }
+    return styleValue;
+  }
+  clearAll() {
+    this.animations.clear();
+    this.animatedStyles.clear();
+    this.pulseAnimations.clear();
+    this.staggerAnimations.clear();
+    this.stopAutoUpdate();
+  }
+  startPulse(key, config) {
+    this.pulseAnimations.set(key, {
+      config,
+      elapsed: 0,
+      active: true
+    });
+    this.startAutoUpdate();
+  }
+  stopPulse(key) {
+    this.pulseAnimations.delete(key);
+  }
+  getPulseValue(key) {
+    const pulse = this.pulseAnimations.get(key);
+    if (!pulse || !pulse.active) {
+      return 0;
+    }
+    const duration = pulse.config.duration ?? 1000;
+    const intensity = pulse.config.intensity ?? 0.5;
+    const phase = pulse.elapsed / duration * 2 * Math.PI;
+    const oscillation = (Math.sin(phase) + 1) / 2;
+    return oscillation * intensity;
+  }
+  hasPulse(key) {
+    return this.pulseAnimations.has(key);
+  }
+  startStagger(key, itemCount, options) {
+    this.staggerAnimations.set(key, {
+      options,
+      itemCount,
+      elapsed: 0,
+      active: true
+    });
+    this.startAutoUpdate();
+  }
+  stopStagger(key) {
+    this.staggerAnimations.delete(key);
+  }
+  getStaggerItemState(key, index) {
+    const stagger = this.staggerAnimations.get(key);
+    if (!stagger || !stagger.active) {
+      return { opacity: 1, offsetY: 0, scale: 1 };
+    }
+    const { options, elapsed } = stagger;
+    const itemStartTime = index * options.delay;
+    const itemElapsed = elapsed - itemStartTime;
+    if (itemElapsed < 0) {
+      switch (options.animation) {
+        case "fade":
+          return { opacity: 0, offsetY: 0, scale: 1 };
+        case "slide-down":
+          return { opacity: 0, offsetY: -20, scale: 1 };
+        case "slide-up":
+          return { opacity: 0, offsetY: 20, scale: 1 };
+        case "scale":
+          return { opacity: 0, offsetY: 0, scale: 0.8 };
+      }
+    }
+    const progress = Math.min(1, itemElapsed / options.duration);
+    const easing = options.easing ?? "ease-out";
+    const easedProgress = getEasingFunction(easing)(progress);
+    switch (options.animation) {
+      case "fade":
+        return { opacity: easedProgress, offsetY: 0, scale: 1 };
+      case "slide-down":
+        return { opacity: easedProgress, offsetY: -20 * (1 - easedProgress), scale: 1 };
+      case "slide-up":
+        return { opacity: easedProgress, offsetY: 20 * (1 - easedProgress), scale: 1 };
+      case "scale":
+        return { opacity: easedProgress, offsetY: 0, scale: 0.8 + 0.2 * easedProgress };
+    }
+  }
+  isStaggerComplete(key) {
+    const stagger = this.staggerAnimations.get(key);
+    if (!stagger)
+      return true;
+    const totalDuration = (stagger.itemCount - 1) * stagger.options.delay + stagger.options.duration;
+    return stagger.elapsed >= totalDuration;
+  }
+  getDebugInfo() {
+    const elementIds = new Set;
+    for (const anim of this.animations.values()) {
+      elementIds.add(anim.element.id);
+    }
+    return {
+      count: this.animations.size,
+      elements: Array.from(elementIds),
+      pulseCount: this.pulseAnimations.size,
+      staggerCount: this.staggerAnimations.size
+    };
+  }
+  getAnimationKey(element, property) {
+    return `${element.id}_${property}`;
+  }
+  updateAnimatedStyle(element, property, value) {
+    let style = this.animatedStyles.get(element.id);
+    if (!style) {
+      style = {};
+      this.animatedStyles.set(element.id, style);
+    }
+    style[property] = value;
+  }
+  interpolateValue(from, to, t) {
+    if (typeof from === "number" && typeof to === "number") {
+      return from + (to - from) * t;
+    }
+    if (typeof from === "string" && typeof to === "string") {
+      if (this.isColorValue(from) && this.isColorValue(to)) {
+        return interpolateColor(from, to, t, "linear");
+      }
+    }
+    return t >= 1 ? to : from;
+  }
+  isColorValue(value) {
+    return value.startsWith("#") || value.startsWith("rgb") || value.startsWith("rgba");
+  }
+  startAutoUpdate() {
+    if (this.autoUpdateRunning)
+      return;
+    this.autoUpdateRunning = true;
+    this.lastTime = performance.now();
+    const tick = (currentTime) => {
+      if (!this.autoUpdateRunning)
+        return;
+      const deltaTime = currentTime - this.lastTime;
+      this.lastTime = currentTime;
+      this.update(deltaTime);
+      if (this.autoUpdateRunning) {
+        this.frameId = requestAnimationFrame(tick);
+      }
+    };
+    this.frameId = requestAnimationFrame(tick);
+  }
+  stopAutoUpdate() {
+    this.autoUpdateRunning = false;
+    if (this.frameId !== null) {
+      cancelAnimationFrame(this.frameId);
+      this.frameId = null;
+    }
+  }
+}
+var UIAnimator = new UIAnimatorClass;
+
 // ../../src/core/ui/components/Button.ts
+var DEFAULT_HOVER_TRANSITION = {
+  property: "backgroundColor",
+  duration: 150,
+  easing: "ease-out"
+};
+var DEFAULT_PRESS_TRANSITION = {
+  property: "all",
+  duration: 50,
+  easing: "ease-out"
+};
+var DEFAULT_RELEASE_TRANSITION = {
+  property: "all",
+  duration: 200,
+  easing: "spring"
+};
+
 class Button extends UIElement {
   _label;
   _disabled = false;
   _icon = null;
+  _previousState = "normal";
+  _animatedScale = 1;
   static defaultStyle = {
-    backgroundColor: "rgba(0, 0, 0, 0.7)",
-    color: "#ffffff",
-    borderColor: "rgba(255, 255, 255, 0.3)",
+    backgroundColor: "rgba(42, 42, 78, 0.9)",
+    color: "#f0f0f0",
+    borderColor: "rgba(58, 58, 90, 0.8)",
     borderWidth: 1,
-    borderRadius: 4,
-    padding: { top: 10, right: 20, bottom: 10, left: 20 },
+    borderRadius: 6,
+    padding: { top: 12, right: 20, bottom: 12, left: 20 },
     fontSize: 14,
     fontFamily: "system-ui, -apple-system, sans-serif",
     textAlign: "center",
     cursor: "pointer",
-    hoverBackgroundColor: "rgba(40, 40, 40, 0.85)",
+    hoverBackgroundColor: "rgba(58, 58, 94, 0.95)",
     hoverColor: "#ffffff",
-    hoverBorderColor: "rgba(255, 255, 255, 0.5)",
-    pressedBackgroundColor: "rgba(20, 20, 20, 0.9)",
-    pressedColor: "#cccccc",
-    pressedBorderColor: "rgba(255, 255, 255, 0.4)",
-    disabledBackgroundColor: "rgba(0, 0, 0, 0.4)",
-    disabledColor: "rgba(255, 255, 255, 0.4)",
-    disabledBorderColor: "rgba(255, 255, 255, 0.15)",
-    focusBorderColor: "rgba(100, 180, 255, 0.8)",
+    hoverBorderColor: "rgba(70, 70, 110, 0.9)",
+    pressedBackgroundColor: "rgba(26, 26, 62, 0.95)",
+    pressedColor: "#d0d0e0",
+    pressedBorderColor: "rgba(50, 50, 80, 0.8)",
+    disabledBackgroundColor: "rgba(30, 30, 50, 0.5)",
+    disabledColor: "rgba(160, 160, 176, 0.5)",
+    disabledBorderColor: "rgba(50, 50, 70, 0.3)",
+    focusBackgroundColor: "rgba(58, 58, 94, 0.95)",
+    focusBorderColor: "rgba(106, 90, 205, 0.9)",
     focusBorderWidth: 2
   };
   constructor(text = "Button", style) {
@@ -2448,45 +2955,46 @@ class Button extends UIElement {
     switch (state) {
       case "hover":
         return {
-          backgroundColor: style.hoverBackgroundColor ?? style.backgroundColor ?? "#4a4a4a",
+          backgroundColor: style.hoverBackgroundColor ?? style.backgroundColor ?? "#3a3a5e",
           color: style.hoverColor ?? style.color ?? "#ffffff",
-          borderColor: style.hoverBorderColor ?? style.borderColor ?? "#666666",
+          borderColor: style.hoverBorderColor ?? style.borderColor ?? "#46466e",
           borderWidth: style.borderWidth ?? 1,
           backgroundImage: style.hoverBackgroundImage ?? style.backgroundImage,
           tint: style.hoverTint ?? style.tint
         };
       case "pressed":
         return {
-          backgroundColor: style.pressedBackgroundColor ?? style.backgroundColor ?? "#2a2a2a",
-          color: style.pressedColor ?? style.color ?? "#dddddd",
-          borderColor: style.pressedBorderColor ?? style.borderColor ?? "#444444",
+          backgroundColor: style.pressedBackgroundColor ?? style.backgroundColor ?? "#1a1a3e",
+          color: style.pressedColor ?? style.color ?? "#d0d0e0",
+          borderColor: style.pressedBorderColor ?? style.borderColor ?? "#323250",
           borderWidth: style.borderWidth ?? 1,
           backgroundImage: style.pressedBackgroundImage ?? style.backgroundImage,
           tint: style.pressedTint ?? style.tint
         };
       case "disabled":
         return {
-          backgroundColor: style.disabledBackgroundColor ?? style.backgroundColor ?? "#2a2a2a",
-          color: style.disabledColor ?? style.color ?? "#666666",
-          borderColor: style.disabledBorderColor ?? style.borderColor ?? "#333333",
+          backgroundColor: style.disabledBackgroundColor ?? style.backgroundColor ?? "#1e1e32",
+          color: style.disabledColor ?? style.color ?? "#606070",
+          borderColor: style.disabledBorderColor ?? style.borderColor ?? "#323246",
           borderWidth: style.borderWidth ?? 1,
           backgroundImage: style.disabledBackgroundImage ?? style.backgroundImage,
           tint: style.disabledTint ?? style.tint
         };
       case "focused":
         return {
-          backgroundColor: style.backgroundColor ?? "#3a3a3a",
-          color: style.color ?? "#ffffff",
-          borderColor: style.focusBorderColor ?? "#5599ff",
+          backgroundColor: style.focusBackgroundColor ?? style.backgroundColor ?? "#3a3a5e",
+          color: style.color ?? "#f0f0f0",
+          borderColor: style.focusBorderColor ?? "#6a5acd",
           borderWidth: style.focusBorderWidth ?? style.borderWidth ?? 2,
           backgroundImage: style.focusedBackgroundImage ?? style.backgroundImage,
-          tint: style.focusedTint ?? style.tint
+          tint: style.focusedTint ?? style.tint,
+          glow: style.focusGlow ?? { blur: 12, color: "#6a5acd", intensity: 0.85 }
         };
       default:
         return {
-          backgroundColor: style.backgroundColor ?? "#3a3a3a",
-          color: style.color ?? "#ffffff",
-          borderColor: style.borderColor ?? "#555555",
+          backgroundColor: style.backgroundColor ?? "#2a2a4e",
+          color: style.color ?? "#f0f0f0",
+          borderColor: style.borderColor ?? "#3a3a5a",
           borderWidth: style.borderWidth ?? 1,
           backgroundImage: style.backgroundImage,
           tint: style.tint
@@ -2500,7 +3008,7 @@ class Button extends UIElement {
     let height = labelSize.height;
     if (this._icon) {
       const iconSize = this._icon.measureContent();
-      width += iconSize.width + (this.style.gap ?? 8);
+      width += iconSize.width + parseGap(this.style.gap ?? 8);
       height = Math.max(height, iconSize.height);
     }
     this._contentSize = {
@@ -2513,7 +3021,89 @@ class Button extends UIElement {
     if (this._disabled) {
       return false;
     }
-    return super.handlePointerEvent(event);
+    const previousState = this._previousState;
+    const result = super.handlePointerEvent(event);
+    const currentState = this.getVisualState();
+    if (currentState !== previousState) {
+      this.triggerStateTransition(previousState, currentState);
+      this._previousState = currentState;
+    }
+    return result;
+  }
+  update(dt) {
+    super.update(dt);
+    const currentState = this.getVisualState();
+    if (currentState !== this._previousState) {
+      this.triggerStateTransition(this._previousState, currentState);
+      this._previousState = currentState;
+    }
+  }
+  triggerStateTransition(from, to) {
+    const style = this.style;
+    if (style.transitionsEnabled === false) {
+      return;
+    }
+    const fromStyle = this.getStyleForState(from);
+    const toStyle = this.getStyleForState(to);
+    let transition;
+    if (to === "pressed") {
+      transition = style.pressTransition ?? DEFAULT_PRESS_TRANSITION;
+      UIAnimator.animate(this, "scale", this._animatedScale, 0.98, {
+        duration: transition.duration,
+        easing: transition.easing ?? "ease-out"
+      });
+    } else if (from === "pressed") {
+      transition = DEFAULT_RELEASE_TRANSITION;
+      UIAnimator.animate(this, "scale", this._animatedScale, 1, {
+        duration: transition.duration,
+        easing: "spring"
+      });
+    } else if (to === "hover" || from === "hover") {
+      transition = style.hoverTransition ?? DEFAULT_HOVER_TRANSITION;
+    } else {
+      transition = DEFAULT_HOVER_TRANSITION;
+    }
+    UIAnimator.transition(this, "backgroundColor", fromStyle.backgroundColor, toStyle.backgroundColor, transition);
+  }
+  getStyleForState(state) {
+    const style = this.style;
+    switch (state) {
+      case "hover":
+        return {
+          backgroundColor: style.hoverBackgroundColor ?? style.backgroundColor ?? "#3a3a5e",
+          color: style.hoverColor ?? style.color ?? "#ffffff",
+          borderColor: style.hoverBorderColor ?? style.borderColor ?? "#46466e",
+          borderWidth: style.borderWidth ?? 1
+        };
+      case "pressed":
+        return {
+          backgroundColor: style.pressedBackgroundColor ?? style.backgroundColor ?? "#1a1a3e",
+          color: style.pressedColor ?? style.color ?? "#d0d0e0",
+          borderColor: style.pressedBorderColor ?? style.borderColor ?? "#323250",
+          borderWidth: style.borderWidth ?? 1
+        };
+      case "disabled":
+        return {
+          backgroundColor: style.disabledBackgroundColor ?? style.backgroundColor ?? "#1e1e32",
+          color: style.disabledColor ?? style.color ?? "#606070",
+          borderColor: style.disabledBorderColor ?? style.borderColor ?? "#323246",
+          borderWidth: style.borderWidth ?? 1
+        };
+      case "focused":
+        return {
+          backgroundColor: style.focusBackgroundColor ?? style.backgroundColor ?? "#3a3a5e",
+          color: style.color ?? "#f0f0f0",
+          borderColor: style.focusBorderColor ?? "#6a5acd",
+          borderWidth: style.focusBorderWidth ?? style.borderWidth ?? 2
+        };
+      default:
+        return {
+          backgroundColor: style.backgroundColor ?? "#2a2a4e",
+          color: style.color ?? "#f0f0f0",
+          borderColor: style.borderColor ?? "#3a3a5a",
+          borderWidth: style.borderWidth ?? 1
+        };
+    }
   }
   getImageBounds(texture) {
     const buttonWidth = this._bounds.width;
@@ -2535,59 +3125,101 @@ class Button extends UIElement {
     const y = this._bounds.y + (buttonHeight - displayHeight) / 2;
     return { x, y, width: displayWidth, height: displayHeight };
   }
-  getRenderData(data, baseZIndex) {
+  getScaledBounds(scale) {
+    if (scale === 1) {
+      return this._bounds;
+    }
+    const centerX = this._bounds.x + this._bounds.width / 2;
+    const centerY = this._bounds.y + this._bounds.height / 2;
+    const scaledWidth = this._bounds.width * scale;
+    const scaledHeight = this._bounds.height * scale;
+    return {
+      x: centerX - scaledWidth / 2,
+      y: centerY - scaledHeight / 2,
+      width: scaledWidth,
+      height: scaledHeight
+    };
+  }
+  getRenderData(data, baseZIndex, inheritedRenderLayer = 0) {
     const stateStyle = this.getStateStyle();
     const style = this.style;
-    const renderLayer = this.style.renderLayer ?? 0;
+    const renderLayer = this.style.renderLayer ?? inheritedRenderLayer;
     const opacity = this.style.opacity ?? 1;
     if (opacity <= 0)
       return;
+    const animStyle = UIAnimator.getAnimatedStyle(this);
+    const animatedBgColor = animStyle?.backgroundColor;
+    const animatedScale = animStyle?.scale ?? 1;
+    const scaledBounds = this.getScaledBounds(animatedScale);
+    const effectiveBgColor = animatedBgColor ?? stateStyle.backgroundColor;
     const bgImage = stateStyle.backgroundImage;
     if (bgImage && bgImage.gpuTexture && bgImage.view) {
       const imageBounds = this.getImageBounds(bgImage);
+      const scaledImageContentBounds = {
+        x: imageBounds.x + (scaledBounds.x - this._bounds.x),
+        y: imageBounds.y + (scaledBounds.y - this._bounds.y),
+        width: imageBounds.width * animatedScale,
+        height: imageBounds.height * animatedScale
+      };
       const imageRenderLayer = style.backgroundImageRenderLayer ?? renderLayer;
       data.push({
         type: "image",
-        bounds: imageBounds,
+        bounds: scaledImageContentBounds,
         zIndex: baseZIndex,
         renderLayer: imageRenderLayer,
         texture: bgImage.gpuTexture,
         textureView: bgImage.view,
         uvRect: { u0: 0, v0: 0, u1: 1, v1: 1 },
         backgroundAlpha: (this.style.backgroundAlpha ?? 1) * opacity,
-        tint: stateStyle.tint
+        tint: stateStyle.tint,
+        glow: stateStyle.glow,
+        scale: animatedScale
       });
       if (stateStyle.borderColor && stateStyle.borderWidth > 0) {
         data.push({
           type: "quad",
-          bounds: { ...this._bounds },
+          bounds: scaledBounds,
           zIndex: baseZIndex + 0.05,
           renderLayer,
           borderColor: stateStyle.borderColor,
           borderWidth: stateStyle.borderWidth,
-          borderRadius: style.borderRadius ?? 4
+          borderRadius: (style.borderRadius ?? 4) * animatedScale,
+          scale: animatedScale
         });
       }
     } else {
       data.push({
         type: "quad",
-        bounds: { ...this._bounds },
+        bounds: scaledBounds,
         zIndex: baseZIndex,
         renderLayer,
-        backgroundColor: stateStyle.backgroundColor,
+        backgroundColor: effectiveBgColor,
         backgroundAlpha: (this.style.backgroundAlpha ?? 1) * opacity,
-        borderColor: stateStyle.borderColor,
-        borderWidth: stateStyle.borderWidth,
-        borderRadius: style.borderRadius ?? 4,
-        tint: stateStyle.tint
+        borderRadius: (style.borderRadius ?? 4) * animatedScale,
+        tint: stateStyle.tint,
+        glow: stateStyle.glow,
+        shadow: this.style.shadow,
+        scale: animatedScale
       });
+      if (stateStyle.borderColor && stateStyle.borderWidth > 0) {
+        data.push({
+          type: "quad",
+          bounds: scaledBounds,
+          zIndex: baseZIndex + 0.01,
+          renderLayer,
+          borderColor: stateStyle.borderColor,
+          borderWidth: stateStyle.borderWidth,
+          borderRadius: (style.borderRadius ?? 4) * animatedScale,
+          scale: animatedScale
+        });
+      }
     }
     const padding = this.getPadding();
     const textBounds = {
-      x: this._bounds.x + padding.left,
-      y: this._bounds.y + padding.top,
-      width: this._bounds.width - padding.left - padding.right,
-      height: this._bounds.height - padding.top - padding.bottom
+      x: scaledBounds.x + padding.left * animatedScale,
+      y: scaledBounds.y + padding.top * animatedScale,
+      width: scaledBounds.width - (padding.left + padding.right) * animatedScale,
+      height: scaledBounds.height - (padding.top + padding.bottom) * animatedScale
     };
     data.push({
       type: "text",
@@ -2596,15 +3228,19 @@ class Button extends UIElement {
       renderLayer,
       text: this._label.text,
       color: stateStyle.color,
-      fontSize: style.fontSize ?? 14,
+      fontSize: (style.fontSize ?? 14) * animatedScale,
       fontFamily: style.fontFamily ?? "sans-serif",
-      textAlign: style.textAlign ?? "center"
+      textAlign: style.textAlign ?? "center",
+      labelShadow: this.style.labelShadow,
+      labelOutline: this.style.labelOutline,
+      scale: animatedScale
     });
     if (this._icon) {
       this._icon.collectRenderData(data, baseZIndex);
     }
   }
   destroy() {
+    UIAnimator.cancelAll(this);
     this._label.destroy();
     if (this._icon) {
       this._icon.destroy();
@@ -2771,9 +3407,9 @@ class Image2 extends UIElement {
     }
     return { x: displayX, y: displayY, width: displayWidth, height: displayHeight };
   }
-  getRenderData(data, baseZIndex) {
+  getRenderData(data, baseZIndex, inheritedRenderLayer = 0) {
     const style = this.style;
-    const renderLayer = this.style.renderLayer ?? 0;
+    const renderLayer = this.style.renderLayer ?? inheritedRenderLayer;
     const opacity = this.style.opacity ?? 1;
     if (opacity <= 0)
       return;
@@ -2800,7 +3436,10 @@ class Image2 extends UIElement {
         textureView: this._textureView,
         uvRect: this._uvRect,
         color: style.tint,
-        backgroundAlpha: (style.tintAlpha ?? 1) * opacity
+        backgroundAlpha: (style.tintAlpha ?? 1) * opacity,
+        nineSlice: style.nineSlice,
+        sourceWidth: this._sourceWidth,
+        sourceHeight: this._sourceHeight
       });
     }
     if (style.borderColor && style.borderWidth) {
@@ -7072,6 +7711,44 @@ class UIRenderPass {
     v[o + 47] = a;
     return 48;
   }
+  addNineSliceQuads(vertexOffset, bounds, nineSlice, sourceWidth, sourceHeight, uvRect, r, g, b, a) {
+    let offset = vertexOffset;
+    const { left: sliceL, right: sliceR, top: sliceT, bottom: sliceB } = nineSlice;
+    const { x, y, width, height } = bounds;
+    const { u0, v0, u1, v1 } = uvRect;
+    const uvWidth = u1 - u0;
+    const uvHeight = v1 - v0;
+    const uvLeft = u0 + sliceL / sourceWidth * uvWidth;
+    const uvRight = u1 - sliceR / sourceWidth * uvWidth;
+    const uvTop = v0 + sliceT / sourceHeight * uvHeight;
+    const uvBottom = v1 - sliceB / sourceHeight * uvHeight;
+    const screenLeft = x + sliceL;
+    const screenRight = x + width - sliceR;
+    const screenTop = y + sliceT;
+    const screenBottom = y + height - sliceB;
+    const centerWidth = Math.max(0, screenRight - screenLeft);
+    const centerHeight = Math.max(0, screenBottom - screenTop);
+    offset += this.addQuad(offset, x, y, sliceL, sliceT, u0, v0, uvLeft, uvTop, r, g, b, a);
+    if (centerWidth > 0) {
+      offset += this.addQuad(offset, screenLeft, y, centerWidth, sliceT, uvLeft, v0, uvRight, uvTop, r, g, b, a);
+    }
+    offset += this.addQuad(offset, screenRight, y, sliceR, sliceT, uvRight, v0, u1, uvTop, r, g, b, a);
+    if (centerHeight > 0) {
+      offset += this.addQuad(offset, x, screenTop, sliceL, centerHeight, u0, uvTop, uvLeft, uvBottom, r, g, b, a);
+    }
+    if (centerWidth > 0 && centerHeight > 0) {
+      offset += this.addQuad(offset, screenLeft, screenTop, centerWidth, centerHeight, uvLeft, uvTop, uvRight, uvBottom, r, g, b, a);
+    }
+    if (centerHeight > 0) {
+      offset += this.addQuad(offset, screenRight, screenTop, sliceR, centerHeight, uvRight, uvTop, u1, uvBottom, r, g, b, a);
+    }
+    offset += this.addQuad(offset, x, screenBottom, sliceL, sliceB, u0, uvBottom, uvLeft, v1, r, g, b, a);
+    if (centerWidth > 0) {
+      offset += this.addQuad(offset, screenLeft, screenBottom, centerWidth, sliceB, uvLeft, uvBottom, uvRight, v1, r, g, b, a);
+    }
+    offset += this.addQuad(offset, screenRight, screenBottom, sliceR, sliceB, uvRight, uvBottom, u1, v1, r, g, b, a);
+    return offset - vertexOffset;
+  }
   execute(commandEncoder, context, globalResources) {
     if (!this.device || !this.context || !this.quadPipeline || !this.vertexBuffer || !this.uniformBindGroup) {
       return;
@@ -7126,17 +7803,23 @@ class UIRenderPass {
           texts.push(data);
         } else if ((data.type === "image" || data.type === "nine-slice") && data.texture && data.textureView) {
           images.push(data);
+        } else if (data.gradient) {
+          roundedQuads.push(data);
         } else if (data.backgroundColor) {
           const alpha = data.backgroundAlpha ?? 1;
           const colorHasAlpha = data.backgroundColor.includes("rgba") && !data.backgroundColor.endsWith(", 1)") && !data.backgroundColor.endsWith(",1)");
           const isSemiTransparent = alpha < 1 || colorHasAlpha;
-          if (data.borderRadius && data.borderRadius > 0 || isSemiTransparent) {
+          const hasGlow = data.glow && data.glow.blur > 0;
+          const hasShadow = !!data.shadow;
+          if (data.borderRadius && data.borderRadius > 0 || isSemiTransparent || hasGlow || hasShadow) {
             roundedQuads.push(data);
           } else {
             backgroundQuads.push(data);
           }
         } else if (data.borderColor && data.borderWidth && data.borderWidth > 0) {
-          if (data.borderRadius && data.borderRadius > 0) {
+          const hasGlow = data.glow && data.glow.blur > 0;
+          const hasShadow = !!data.shadow;
+          if (data.borderRadius && data.borderRadius > 0 || hasGlow || hasShadow) {
             roundedQuads.push(data);
           } else {
             overlayQuads.push(data);
@@ -7175,11 +7858,18 @@ class UIRenderPass {
         color = this.applyTint(color, data.tint);
         const [r, g, b, a] = color;
         const vertexStart = globalVertexOffset / 48;
-        globalVertexOffset += this.addQuad(globalVertexOffset, bounds.x, bounds.y, bounds.width, bounds.height, uvRect.u0, uvRect.v0, uvRect.u1, uvRect.v1, r, g, b, a);
+        let vertexFloats;
+        if (data.type === "nine-slice" && data.nineSlice && data.sourceWidth && data.sourceHeight) {
+          vertexFloats = this.addNineSliceQuads(globalVertexOffset, bounds, data.nineSlice, data.sourceWidth, data.sourceHeight, uvRect, r, g, b, a);
+        } else {
+          vertexFloats = this.addQuad(globalVertexOffset, bounds.x, bounds.y, bounds.width, bounds.height, uvRect.u0, uvRect.v0, uvRect.u1, uvRect.v1, r, g, b, a);
+        }
+        globalVertexOffset += vertexFloats;
+        const vertexCount = vertexFloats / 8;
         if (!layerInfo.images.has(data.texture)) {
           layerInfo.images.set(data.texture, []);
         }
-        layerInfo.images.get(data.texture).push({ data, vertexStart });
+        layerInfo.images.get(data.texture).push({ data, vertexStart, vertexCount });
       }
       layerInfo.overlayQuadStart = globalVertexOffset / 48;
       for (const data of overlayQuads) {
@@ -7235,7 +7925,7 @@ class UIRenderPass {
           passEncoder.setBindGroup(0, this.uniformBindGroup);
           passEncoder.setBindGroup(1, bindGroup);
           for (const img of imageList) {
-            passEncoder.draw(6, 1, img.vertexStart * 6, 0);
+            passEncoder.draw(img.vertexCount, 1, img.vertexStart * 6, 0);
           }
         }
         if (layerInfo.overlayQuadCount > 0) {
@@ -7318,12 +8008,34 @@ class UIRenderPass {
     const bgAlpha = data.backgroundAlpha ?? 1;
     const borderColor = data.borderColor;
     const borderWidth = data.borderWidth ?? 0;
-    if (bgColor) {
-      const [r, g, b, a] = this.parseColor(bgColor, bgAlpha);
-      this.textContext.fillStyle = `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${a})`;
+    const gradient = data.gradient;
+    const glow = data.glow;
+    const hasGlow = glow && glow.blur > 0 && (bgColor || gradient);
+    if (hasGlow) {
+      const [gr, gg, gb] = this.parseColor(glow.color, 1);
+      const glowIntensity = glow.intensity ?? 1;
+      this.textContext.shadowColor = `rgba(${Math.round(gr * 255)}, ${Math.round(gg * 255)}, ${Math.round(gb * 255)}, ${glowIntensity})`;
+      this.textContext.shadowBlur = glow.blur;
+      this.textContext.shadowOffsetX = 0;
+      this.textContext.shadowOffsetY = 0;
+    }
+    if (data.shadow) {
+      this.renderShadows(data);
+    }
+    if (gradient || bgColor) {
+      if (gradient) {
+        this.textContext.fillStyle = this.createCanvasGradient(gradient, bounds, bgAlpha);
+      } else if (bgColor) {
+        const [r, g, b, a] = this.parseColor(bgColor, bgAlpha);
+        this.textContext.fillStyle = `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${a})`;
+      }
       this.textContext.beginPath();
       this.roundRect(bounds.x, bounds.y, bounds.width, bounds.height, radius);
       this.textContext.fill();
+    }
+    if (hasGlow) {
+      this.textContext.shadowColor = "transparent";
+      this.textContext.shadowBlur = 0;
     }
     if (borderColor && borderWidth > 0) {
       const [r, g, b, a] = this.parseColor(borderColor, 1);
@@ -7334,6 +8046,101 @@ class UIRenderPass {
       this.roundRect(bounds.x + inset, bounds.y + inset, bounds.width - borderWidth, bounds.height - borderWidth, Math.max(0, radius - inset));
       this.textContext.stroke();
     }
+  }
+  createCanvasGradient(gradient, bounds, alpha) {
+    if (!this.textContext) {
+      throw new Error("Text context not available");
+    }
+    let canvasGradient;
+    if (gradient.type === "linear") {
+      const angle = (gradient.angle ?? 0) * (Math.PI / 180);
+      const centerX = bounds.x + bounds.width / 2;
+      const centerY = bounds.y + bounds.height / 2;
+      const diag = Math.sqrt(bounds.width * bounds.width + bounds.height * bounds.height) / 2;
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
+      const x0 = centerX - cos * diag;
+      const y0 = centerY - sin * diag;
+      const x1 = centerX + cos * diag;
+      const y1 = centerY + sin * diag;
+      canvasGradient = this.textContext.createLinearGradient(x0, y0, x1, y1);
+    } else {
+      const centerX = bounds.x + bounds.width * (gradient.centerX ?? 0.5);
+      const centerY = bounds.y + bounds.height * (gradient.centerY ?? 0.5);
+      const baseRadius = Math.min(bounds.width, bounds.height) * (gradient.radius ?? 0.5);
+      canvasGradient = this.textContext.createRadialGradient(centerX, centerY, 0, centerX, centerY, baseRadius);
+    }
+    for (const stop of gradient.stops) {
+      const [r, g, b, a] = this.parseColor(stop.color, alpha);
+      canvasGradient.addColorStop(Math.max(0, Math.min(1, stop.position)), `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${a})`);
+    }
+    return canvasGradient;
+  }
+  renderShadows(data) {
+    if (!this.textContext || !data.shadow)
+      return;
+    const bounds = data.bounds;
+    const radius = data.borderRadius ?? 0;
+    const shadows = Array.isArray(data.shadow) ? data.shadow : [data.shadow];
+    for (let i = shadows.length - 1;i >= 0; i--) {
+      const shadow = shadows[i];
+      const offsetX = shadow.offsetX ?? 0;
+      const offsetY = shadow.offsetY ?? 0;
+      const blur = shadow.blur;
+      const spread = shadow.spread ?? 0;
+      const [r, g, b, a] = this.parseColor(shadow.color, 1);
+      if (shadow.inset) {
+        this.renderInsetShadow(bounds, radius, offsetX, offsetY, blur, spread, r, g, b, a);
+      } else {
+        this.textContext.save();
+        this.textContext.shadowColor = `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${a})`;
+        this.textContext.shadowBlur = blur;
+        this.textContext.shadowOffsetX = offsetX;
+        this.textContext.shadowOffsetY = offsetY;
+        this.textContext.fillStyle = "rgba(0, 0, 0, 1)";
+        this.textContext.beginPath();
+        this.roundRect(bounds.x - spread, bounds.y - spread, bounds.width + spread * 2, bounds.height + spread * 2, Math.max(0, radius + spread));
+        this.textContext.fill();
+        this.textContext.shadowColor = "transparent";
+        this.textContext.globalCompositeOperation = "destination-out";
+        this.textContext.beginPath();
+        this.roundRect(bounds.x, bounds.y, bounds.width, bounds.height, radius);
+        this.textContext.fill();
+        this.textContext.restore();
+      }
+    }
+  }
+  renderInsetShadow(bounds, radius, offsetX, offsetY, blur, spread, r, g, b, a) {
+    if (!this.textContext)
+      return;
+    this.textContext.save();
+    this.textContext.beginPath();
+    this.roundRect(bounds.x, bounds.y, bounds.width, bounds.height, radius);
+    this.textContext.clip();
+    this.textContext.shadowColor = `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${a})`;
+    this.textContext.shadowBlur = blur;
+    this.textContext.shadowOffsetX = offsetX;
+    this.textContext.shadowOffsetY = offsetY;
+    const margin = blur + Math.abs(offsetX) + Math.abs(offsetY) + spread + 100;
+    this.textContext.fillStyle = "rgba(0, 0, 0, 1)";
+    this.textContext.beginPath();
+    this.textContext.rect(bounds.x - margin, bounds.y - margin, bounds.width + margin * 2, bounds.height + margin * 2);
+    const innerX = bounds.x + spread;
+    const innerY = bounds.y + spread;
+    const innerW = bounds.width - spread * 2;
+    const innerH = bounds.height - spread * 2;
+    const innerR = Math.max(0, radius - spread);
+    this.textContext.moveTo(innerX + innerR, innerY);
+    this.textContext.lineTo(innerX + innerW - innerR, innerY);
+    this.textContext.quadraticCurveTo(innerX + innerW, innerY, innerX + innerW, innerY + innerR);
+    this.textContext.lineTo(innerX + innerW, innerY + innerH - innerR);
+    this.textContext.quadraticCurveTo(innerX + innerW, innerY + innerH, innerX + innerW - innerR, innerY + innerH);
+    this.textContext.lineTo(innerX + innerR, innerY + innerH);
+    this.textContext.quadraticCurveTo(innerX, innerY + innerH, innerX, innerY + innerH - innerR);
+    this.textContext.lineTo(innerX, innerY + innerR);
+    this.textContext.quadraticCurveTo(innerX, innerY, innerX + innerR, innerY);
+    this.textContext.fill("evenodd");
+    this.textContext.restore();
   }
   roundRect(x, y, w, h, r) {
     if (!this.textContext)
@@ -7359,10 +8166,14 @@ class UIRenderPass {
     const textAlign = data.textAlign ?? "left";
     const color = data.color ?? "#ffffff";
     const alpha = data.textAlpha ?? 1;
-    this.textContext.font = `${fontSize}px ${fontFamily}`;
+    const letterSpacing = data.letterSpacing ?? 0;
+    const lineHeightMultiplier = data.lineHeight ?? 1.4;
+    const fontWeight = this.resolveFontWeight(data.fontWeight);
+    this.textContext.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
     this.textContext.globalAlpha = alpha;
     this.textContext.fillStyle = color;
     this.textContext.textBaseline = "middle";
+    this.textContext.letterSpacing = `${letterSpacing}px`;
     let x;
     switch (textAlign) {
       case "center":
@@ -7380,12 +8191,53 @@ class UIRenderPass {
     const y = bounds.y + bounds.height / 2;
     const lines = data.text.split(`
 `);
-    const lineHeight = fontSize * 1.4;
+    const lineHeight = fontSize * lineHeightMultiplier;
     const totalHeight = lines.length * lineHeight;
     const startY = y - totalHeight / 2 + lineHeight / 2;
+    const shadow = data.labelShadow;
+    if (shadow) {
+      this.textContext.shadowColor = shadow.color;
+      this.textContext.shadowBlur = shadow.blur ?? 0;
+      this.textContext.shadowOffsetX = shadow.offsetX ?? 0;
+      this.textContext.shadowOffsetY = shadow.offsetY ?? 0;
+    }
+    const outline = data.labelOutline;
+    if (outline) {
+      this.textContext.strokeStyle = outline.color;
+      this.textContext.lineWidth = outline.width;
+      this.textContext.lineJoin = "round";
+      this.textContext.miterLimit = 2;
+      for (let i = 0;i < lines.length; i++) {
+        this.textContext.strokeText(lines[i], x, startY + i * lineHeight);
+      }
+      if (shadow) {
+        this.textContext.shadowColor = "transparent";
+        this.textContext.shadowBlur = 0;
+        this.textContext.shadowOffsetX = 0;
+        this.textContext.shadowOffsetY = 0;
+      }
+    }
     for (let i = 0;i < lines.length; i++) {
       this.textContext.fillText(lines[i], x, startY + i * lineHeight);
     }
+    if (shadow && !outline) {
+      this.textContext.shadowColor = "transparent";
+      this.textContext.shadowBlur = 0;
+      this.textContext.shadowOffsetX = 0;
+      this.textContext.shadowOffsetY = 0;
+    }
+    this.textContext.letterSpacing = "0px";
+  }
+  resolveFontWeight(weight) {
+    if (weight === undefined || weight === "normal")
+      return "400";
+    if (weight === "medium")
+      return "500";
+    if (weight === "bold")
+      return "700";
+    if (typeof weight === "number")
+      return String(weight);
+    return "400";
   }
   renderRichText(data, time) {
     if (!this.textContext || !data.richTextSegments)
@@ -7394,49 +8246,95 @@ class UIRenderPass {
     const baseFontSize = data.fontSize ?? 16;
     const fontFamily = data.fontFamily ?? "sans-serif";
     const baseColor = data.color ?? "#ffffff";
-    const lineHeight = baseFontSize * 1.4;
+    const letterSpacing = data.letterSpacing ?? 0;
+    const lineHeightMultiplier = data.lineHeight ?? 1.4;
+    const baseFontWeight = this.resolveFontWeight(data.fontWeight);
+    const lineHeight = baseFontSize * lineHeightMultiplier;
+    this.textContext.letterSpacing = `${letterSpacing}px`;
     this.textContext.textAlign = "left";
     this.textContext.textBaseline = "middle";
+    const shadow = data.labelShadow;
+    if (shadow) {
+      this.textContext.shadowColor = shadow.color;
+      this.textContext.shadowBlur = shadow.blur ?? 0;
+      this.textContext.shadowOffsetX = shadow.offsetX ?? 0;
+      this.textContext.shadowOffsetY = shadow.offsetY ?? 0;
+    }
+    const outline = data.labelOutline;
+    if (outline) {
+      this.textContext.lineJoin = "round";
+      this.textContext.miterLimit = 2;
+    }
     let x = bounds.x;
     let y = bounds.y + lineHeight / 2;
     let charIndex = 0;
-    for (const segment of data.richTextSegments) {
-      if (!segment.text)
-        continue;
-      const fontSize = segment.fontSize ?? baseFontSize;
-      const color = segment.color ?? baseColor;
-      const bold = segment.bold ?? false;
-      const italic = segment.italic ?? false;
-      const fontStyle = `${italic ? "italic " : ""}${bold ? "bold " : ""}${fontSize}px ${fontFamily}`;
-      this.textContext.font = fontStyle;
-      this.textContext.fillStyle = color;
-      for (const char of segment.text) {
-        if (char === `
-`) {
-          x = bounds.x;
-          y += lineHeight;
-          charIndex++;
+    const passes = outline ? ["stroke", "fill"] : ["fill"];
+    for (const pass of passes) {
+      x = bounds.x;
+      y = bounds.y + lineHeight / 2;
+      charIndex = 0;
+      if (pass === "fill" && outline && shadow) {
+        this.textContext.shadowColor = "transparent";
+        this.textContext.shadowBlur = 0;
+        this.textContext.shadowOffsetX = 0;
+        this.textContext.shadowOffsetY = 0;
+      }
+      for (const segment of data.richTextSegments) {
+        if (!segment.text)
           continue;
+        const fontSize = segment.fontSize ?? baseFontSize;
+        const color = segment.color ?? baseColor;
+        const bold = segment.bold ?? false;
+        const italic = segment.italic ?? false;
+        const weight = bold ? "bold" : baseFontWeight;
+        const fontStyle = `${italic ? "italic " : ""}${weight} ${fontSize}px ${fontFamily}`;
+        this.textContext.font = fontStyle;
+        if (pass === "stroke" && outline) {
+          this.textContext.strokeStyle = outline.color;
+          this.textContext.lineWidth = outline.width;
+        } else {
+          this.textContext.fillStyle = color;
         }
-        let offsetX = 0;
-        let offsetY = 0;
-        if (segment.shake) {
-          offsetX = (Math.random() - 0.5) * 3;
-          offsetY = (Math.random() - 0.5) * 3;
+        for (const char of segment.text) {
+          if (char === `
+`) {
+            x = bounds.x;
+            y += lineHeight;
+            charIndex++;
+            continue;
+          }
+          let offsetX = 0;
+          let offsetY = 0;
+          if (segment.shake) {
+            const shakeTime = Math.floor(time * 20);
+            offsetX = (Math.sin(charIndex * 123.456 + shakeTime) * 0.5 - 0.25) * 6;
+            offsetY = (Math.cos(charIndex * 789.123 + shakeTime) * 0.5 - 0.25) * 6;
+          }
+          if (segment.wave) {
+            offsetY += Math.sin(time * 4 + charIndex * 0.3) * 3;
+          }
+          if (pass === "stroke" && outline) {
+            this.textContext.strokeText(char, x + offsetX, y + offsetY);
+          } else {
+            this.textContext.fillText(char, x + offsetX, y + offsetY);
+          }
+          const charWidth = this.textContext.measureText(char).width;
+          x += charWidth;
+          if (x > bounds.x + bounds.width && char === " ") {
+            x = bounds.x;
+            y += lineHeight;
+          }
+          charIndex++;
         }
-        if (segment.wave) {
-          offsetY += Math.sin(time * 4 + charIndex * 0.3) * 3;
-        }
-        this.textContext.fillText(char, x + offsetX, y + offsetY);
-        const charWidth = this.textContext.measureText(char).width;
-        x += charWidth;
-        if (x > bounds.x + bounds.width && char === " ") {
-          x = bounds.x;
-          y += lineHeight;
-        }
-        charIndex++;
       }
     }
+    if (shadow) {
+      this.textContext.shadowColor = "transparent";
+      this.textContext.shadowBlur = 0;
+      this.textContext.shadowOffsetX = 0;
+      this.textContext.shadowOffsetY = 0;
+    }
+    this.textContext.letterSpacing = "0px";
   }
   destroy() {
     this.vertexBuffer?.destroy();
@@ -9937,6 +10835,9 @@ class RenderGraph {
   }
   addPass(pass) {
     this.passes.push(pass);
+  }
+  insertPassAt(index, pass) {
+    this.passes.splice(index, 0, pass);
   }
   removePass(pass) {
     const index = this.passes.indexOf(pass);
@@ -15987,7 +16888,7 @@ var<private> morphConfig: vec2<u32>;
   return modifiedShader;
 }
 // ../../src/core/animation/Easing.ts
-var linear = (t) => t;
+var linear2 = (t) => t;
 var easeInQuad = (t) => t * t;
 var easeOutQuad = (t) => 1 - (1 - t) * (1 - t);
 var easeInOutQuad = (t) => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
@@ -16036,7 +16937,7 @@ var easeOutBounce = (t) => {
 var easeInBounce = (t) => 1 - easeOutBounce(1 - t);
 var easeInOutBounce = (t) => t < 0.5 ? (1 - easeOutBounce(1 - 2 * t)) / 2 : (1 + easeOutBounce(2 * t - 1)) / 2;
 var Easing = {
-  linear,
+  linear: linear2,
   easeInQuad,
   easeOutQuad,
   easeInOutQuad,
@@ -16072,7 +16973,7 @@ function getEasing(name) {
   if (typeof name === "function") {
     return name;
   }
-  return Easing[name] ?? linear;
+  return Easing[name] ?? linear2;
 }
 // ../../src/core/animation/Tween.ts
 function isVector2(value) {
@@ -16155,7 +17056,7 @@ class Tween {
   _started = false;
   duration = 1;
   delay = 0;
-  easing = linear;
+  easing = linear2;
   repeat = 0;
   repeatDelay = 0;
   yoyo = false;
@@ -31694,6 +32595,7 @@ class Engine {
   motionBlurPass = null;
   lensEffectsPass = null;
   godRaysPass = null;
+  geometryPass = null;
   frameIndex = 0;
   statsReadBuffer = null;
   static STATS_ZERO_BUFFER = new Uint32Array([0, 0, 0, 0]);
@@ -31780,7 +32682,9 @@ class Engine {
       this.device.addEventListener("uncapturederror", (event) => {
         const error = event.error;
         console.error("WebGPU uncaptured error:", error.message);
-        ErrorOverlay.getInstance().reportError(error.message, "Uncaptured WebGPU Error");
+        if (!this.config?.disableErrorOverlay) {
+          ErrorOverlay.getInstance().reportError(error.message, "Uncaptured WebGPU Error");
+        }
       });
     }
     this.context = this.canvas.getContext("webgpu");
@@ -31805,6 +32709,7 @@ class Engine {
     const shadowPass = new ShadowPass;
     const pointShadowPass = new PointShadowPass;
     const geometryPass = new GeometryPass(gBuffer);
+    this.geometryPass = geometryPass;
     const ssaoPass = new SSAOPass(gBuffer);
     this.ssaoPass = ssaoPass;
     if (this.softwareConfig.disableSSAO) {
@@ -31927,6 +32832,25 @@ class Engine {
   }
   removeRenderPass(pass) {
     return this.renderGraph.removePass(pass);
+  }
+  addGBufferRenderPass(pass) {
+    if (!this.device || !this.context || !this.presentationFormat) {
+      console.warn("Engine.addGBufferRenderPass: Engine not initialized yet");
+      return;
+    }
+    const passes = this.renderGraph.getPasses();
+    const geometryIndex = passes.indexOf(this.geometryPass);
+    if (geometryIndex !== -1) {
+      this.renderGraph.insertPassAt(geometryIndex + 1, pass);
+    } else {
+      console.warn("Engine.addGBufferRenderPass: GeometryPass not found, appending to end");
+      this.renderGraph.addPass(pass);
+    }
+    pass.init(this.device, this.context, this.presentationFormat);
+    pass.resize(this.canvas.width, this.canvas.height);
+  }
+  getGBuffer() {
+    return this.gBuffer;
   }
   getDebugOverlay() {
     return this.debugger;
