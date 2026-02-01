@@ -7,7 +7,7 @@
  * Backend selection order:
  * 1. Vulkan RT (Linux, Windows with Vulkan SDK, macOS with MoltenVK)
  * 2. DXR (Windows with DirectX 12 - TODO)
- * 3. Metal RT (Apple Silicon with Metal 3 - TODO)
+ * 3. Metal RT (Apple Silicon with macOS 13+/Metal 3)
  * 4. Stub (fallback when no hardware RT available)
  */
 
@@ -16,6 +16,10 @@
 
 #ifdef MYSTRAL_HAS_VULKAN_RT
 #include "vulkan_rt.h"
+#endif
+
+#ifdef MYSTRAL_HAS_METAL_RT
+#include "metal_rt.h"
 #endif
 
 namespace mystral {
@@ -128,13 +132,17 @@ std::unique_ptr<IRTBackend> createRTBackend() {
     //     }
     // #endif
 
-    // TODO: Add Metal RT backend for Apple Silicon
-    // #ifdef MYSTRAL_HAS_METAL_RT
-    //     auto metal = std::make_unique<MetalRTBackend>();
-    //     if (metal->initialize()) {
-    //         return metal;
-    //     }
-    // #endif
+#ifdef MYSTRAL_HAS_METAL_RT
+    // Try Metal RT backend (Apple Silicon with macOS 13+)
+    {
+        auto metal = std::make_unique<MetalRTBackend>();
+        if (metal->initialize()) {
+            std::cout << "[MystralRT] Using Metal RT backend" << std::endl;
+            return metal;
+        }
+        std::cout << "[MystralRT] Metal RT initialization failed, trying fallback..." << std::endl;
+    }
+#endif
 
     // Fallback to stub backend
     std::cout << "[MystralRT] No hardware RT available, using stub backend" << std::endl;

@@ -870,6 +870,15 @@ if(MYSTRAL_USE_RAYTRACING)
             message(STATUS "  Set VULKAN_SDK environment variable or install Vulkan SDK")
         endif()
     endif()
+
+    # Metal RT backend (Apple Silicon with macOS 13+)
+    # Metal 3 ray tracing requires Apple Silicon (M1/M2/M3) - Intel Macs not supported
+    if(APPLE AND NOT MYSTRAL_PLATFORM STREQUAL "ios")
+        # Check for macOS 13+ (Ventura) at runtime; always enable compilation on macOS
+        add_compile_definitions(MYSTRAL_HAS_METAL_RT)
+        set(METAL_RT_ENABLED TRUE)
+        message(STATUS "Metal RT backend enabled (Apple Silicon with macOS 13+ required at runtime)")
+    endif()
 endif()
 
 # ============================================================================
@@ -916,6 +925,13 @@ if(MYSTRAL_USE_RAYTRACING)
     if(Vulkan_FOUND)
         list(APPEND MYSTRAL_SOURCES
             src/raytracing/vulkan_rt.cpp
+        )
+    endif()
+
+    # Add Metal RT backend on Apple platforms
+    if(METAL_RT_ENABLED)
+        list(APPEND MYSTRAL_SOURCES
+            src/raytracing/metal_rt.mm
         )
     endif()
 endif()

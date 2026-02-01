@@ -5,11 +5,17 @@
  * Renders a classic Cornell box scene with primary rays.
  *
  * Requirements:
- * - GPU with Vulkan RT support (NVIDIA RTX, AMD RDNA2+)
+ * - GPU with hardware RT support:
+ *   - Vulkan RT: NVIDIA RTX, AMD RDNA2+ (Linux/Windows)
+ *   - Metal RT: Apple Silicon M1/M2/M3 with macOS 13+ (macOS)
  * - MystralNative built with MYSTRAL_USE_RAYTRACING=ON
  *
  * Usage:
  *   ./mystral run examples/rt-cornell-box.js
+ *
+ * The backend will automatically be selected based on platform:
+ *   - macOS: Metal RT (Apple Silicon) or Vulkan (via MoltenVK)
+ *   - Linux/Windows: Vulkan RT
  */
 
 const width = 800;
@@ -21,7 +27,9 @@ console.log('Ray Tracing Supported:', mystralRT.isSupported());
 
 if (!mystralRT.isSupported()) {
     console.log('Hardware ray tracing not available.');
-    console.log('This example requires a GPU with Vulkan RT support.');
+    console.log('This example requires:');
+    console.log('  - macOS: Apple Silicon (M1/M2/M3) with macOS 13+');
+    console.log('  - Linux/Windows: GPU with Vulkan RT support (NVIDIA RTX, AMD RDNA2+)');
     // Exit gracefully
     if (typeof process !== 'undefined') {
         process.exit(0);
