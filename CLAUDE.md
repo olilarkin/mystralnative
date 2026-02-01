@@ -90,6 +90,54 @@ cmake --build build --parallel
 
 See `README.md` for full build options.
 
+## Debug Logging
+
+By default, MystralNative runs with minimal logging. To enable verbose WebGPU/shader/canvas debug logs:
+
+```bash
+# Via CLI flag
+./build/mystral run game.js --debug
+
+# Via environment variable
+MYSTRAL_DEBUG=1 ./build/mystral run game.js
+```
+
+Debug mode logs every WebGPU operation (render passes, draw calls, texture creation, shader compilation, etc.), which is useful for diagnosing rendering issues but produces a lot of output.
+
+## Regression Testing
+
+Use `scripts/test-examples.sh` to run visual regression tests for all major rendering paths. This script runs examples in headless mode, captures screenshots, and verifies they render correctly.
+
+```bash
+# Run all regression tests
+./scripts/test-examples.sh
+```
+
+The script tests:
+- **Canvas 2D**: impact-test, canvas2d-test
+- **PixiJS v8**: pixi-test, pixi-hello
+- **Three.js**: threejs-cube, threejs-text, threejs-docs-demo
+- **Mystral Engine**: mystral-helmet, sponza
+- **Raw WebGPU**: rotating-cube, simple-cube
+
+Screenshots are saved to `/tmp/mystral-test-*.png` for manual inspection if needed.
+
+**When to run:**
+- After modifying Canvas 2D, WebGPU bindings, or rendering code
+- Before creating a PR with rendering changes
+- To verify a build works correctly
+
+**Output:**
+```
+=== MystralNative Example Tests ===
+Testing impact... PASS (/tmp/mystral-test-impact.png)
+Testing pixi-test... PASS (/tmp/mystral-test-pixi-test.png)
+...
+=== Summary ===
+Passed: 11
+Failed: 0
+```
+
 ## Production Builds
 
 Use the local production build script to build, strip, filter assets, and package a macOS `.app` bundle. This mirrors what the GitHub Actions `sponza.yml` workflow does in CI.

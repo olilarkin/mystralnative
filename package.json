@@ -37,6 +37,7 @@
     "@types/bun": "^1.1.0"
   },
   "dependencies": {
+    "Impact": "github:phoboslab/Impact",
     "pixi.js": "^8"
   }
 }

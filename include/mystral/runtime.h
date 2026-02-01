@@ -20,6 +20,7 @@ struct RuntimeConfig {
     bool resizable = true;
     bool noSdl = false;  // Run without SDL (headless GPU mode, no window)
     bool watch = false;  // Watch mode: reload script on file changes
+    bool debug = false;  // Enable verbose debug logging
 };
 
 /**

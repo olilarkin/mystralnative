@@ -371,6 +371,116 @@ js::JSValueHandle createCanvas2DJSObject(js::Engine* engine, Canvas2DContext* ct
         })
     );
 
+    // putImageData(imageData, x, y)
+    engine->setProperty(jsCtx, "putImageData",
+        engine->newFunction("putImageData", [capturedCtx](void* c, const std::vector<js::JSValueHandle>& args) {
+            if (capturedCtx && args.size() >= 3) {
+                auto imageDataObj = args[0];
+                int x = static_cast<int>(g_jsEngine->toNumber(args[1]));
+                int y = static_cast<int>(g_jsEngine->toNumber(args[2]));
+
+                // Extract ImageData properties
+                int width = static_cast<int>(g_jsEngine->toNumber(g_jsEngine->getProperty(imageDataObj, "width")));
+                int height = static_cast<int>(g_jsEngine->toNumber(g_jsEngine->getProperty(imageDataObj, "height")));
+                auto dataHandle = g_jsEngine->getProperty(imageDataObj, "data");
+
+                // Get the data array
+                size_t dataSize = 0;
+                void* dataPtr = g_jsEngine->getArrayBufferData(dataHandle, &dataSize);
+
+                if (dataPtr && dataSize > 0) {
+                    ImageData imgData;
+                    imgData.width = width;
+                    imgData.height = height;
+                    imgData.data.assign(static_cast<uint8_t*>(dataPtr),
+                                       static_cast<uint8_t*>(dataPtr) + dataSize);
+                    capturedCtx->putImageData(imgData, x, y);
+                }
+            }
+            return g_jsEngine->newUndefined();
+        })
+    );
+
+    // createImageData(width, height) -> ImageData
+    engine->setProperty(jsCtx, "createImageData",
+        engine->newFunction("createImageData", [capturedCtx](void* c, const std::vector<js::JSValueHandle>& args) {
+            auto result = g_jsEngine->newObject();
+            if (args.size() >= 2) {
+                int width = static_cast<int>(g_jsEngine->toNumber(args[0]));
+                int height = static_cast<int>(g_jsEngine->toNumber(args[1]));
+
+                g_jsEngine->setProperty(result, "width", g_jsEngine->newNumber(width));
+                g_jsEngine->setProperty(result, "height", g_jsEngine->newNumber(height));
+
+                // Create Uint8Array filled with zeros (transparent black)
+                size_t dataSize = width * height * 4;
+                std::vector<uint8_t> data(dataSize, 0);
+                auto dataArray = g_jsEngine->createUint8Array(data.data(), data.size());
+                g_jsEngine->setProperty(result, "data", dataArray);
+            }
+            return result;
+        })
+    );
+
+    // drawImage - draws another canvas or image onto this canvas
+    // Supports: drawImage(image, dx, dy)
+    //           drawImage(image, dx, dy, dWidth, dHeight)
+    //           drawImage(image, sx, sy, sWidth, sHeight, dx, dy, dWidth, dHeight)
+    engine->setProperty(jsCtx, "drawImage",
+        engine->newFunction("drawImage", [capturedCtx](void* c, const std::vector<js::JSValueHandle>& args) {
+            if (!capturedCtx || args.empty()) {
+                return g_jsEngine->newUndefined();
+            }
+
+            auto imageArg = args[0];
+
+            // Check if it's a canvas element (has getContext method and _context2d)
+            auto context2d = g_jsEngine->getProperty(imageArg, "_context2d");
+            if (!g_jsEngine->isUndefined(context2d) && !g_jsEngine->isNull(context2d)) {
+                // It's a canvas element, get its Canvas2DContext
+                Canvas2DContext* sourceCtx = static_cast<Canvas2DContext*>(g_jsEngine->getPrivateData(context2d));
+                if (sourceCtx) {
+                    // Get source canvas dimensions
+                    int srcWidth = sourceCtx->getWidth();
+                    int srcHeight = sourceCtx->getHeight();
+
+                    // Get the pixel data from source canvas
+                    ImageData srcData = sourceCtx->getImageData(0, 0, srcWidth, srcHeight);
+
+                    if (args.size() == 3) {
+                        // drawImage(image, dx, dy)
+                        int dx = static_cast<int>(g_jsEngine->toNumber(args[1]));
+                        int dy = static_cast<int>(g_jsEngine->toNumber(args[2]));
+                        capturedCtx->putImageData(srcData, dx, dy);
+                    } else if (args.size() == 5) {
+                        // drawImage(image, dx, dy, dWidth, dHeight) - scaled
+                        // For now, just use putImageData without scaling
+                        // TODO: Implement scaling
+                        int dx = static_cast<int>(g_jsEngine->toNumber(args[1]));
+                        int dy = static_cast<int>(g_jsEngine->toNumber(args[2]));
+                        capturedCtx->putImageData(srcData, dx, dy);
+                    } else if (args.size() >= 9) {
+                        // drawImage(image, sx, sy, sWidth, sHeight, dx, dy, dWidth, dHeight)
+                        int sx = static_cast<int>(g_jsEngine->toNumber(args[1]));
+                        int sy = static_cast<int>(g_jsEngine->toNumber(args[2]));
+                        int sWidth = static_cast<int>(g_jsEngine->toNumber(args[3]));
+                        int sHeight = static_cast<int>(g_jsEngine->toNumber(args[4]));
+                        int dx = static_cast<int>(g_jsEngine->toNumber(args[5]));
+                        int dy = static_cast<int>(g_jsEngine->toNumber(args[6]));
+                        // dWidth and dHeight for scaling (ignored for now)
+
+                        // Get sub-region of source
+                        ImageData subData = sourceCtx->getImageData(sx, sy, sWidth, sHeight);
+                        capturedCtx->putImageData(subData, dx, dy);
+                    }
+                }
+            }
+            // TODO: Support HTMLImageElement and ImageBitmap
+
+            return g_jsEngine->newUndefined();
+        })
+    );
+
     // Transform methods for PixiJS font rendering
 
     // scale(x, y)

@@ -319,6 +319,7 @@ VIDEO RECORDING OPTIONS:
     --mp4                 Convert to MP4 via FFmpeg (auto-detected if --video ends in .mp4)
 
 DEBUG/TESTING OPTIONS:
+    --debug               Enable verbose debug logging (WebGPU, shaders, etc.)
     --debug-port <port>   Enable debug server on specified port (e.g., 9222)
                           Allows remote testing via WebSocket protocol
 
@@ -420,6 +421,9 @@ struct CLIOptions {
 
     // Debug server
     int debugPort = 0;  // Port for debug server (0 = disabled)
+
+    // Verbose logging
+    bool debug = false;  // Enable verbose WebGPU/shader logging
 };
 
 CLIOptions parseArgs(int argc, char* argv[]) {
@@ -481,6 +485,8 @@ CLIOptions parseArgs(int argc, char* argv[]) {
             opts.convertToMp4 = true;
         } else if (arg == "--debug-port" && i + 1 < argc) {
             opts.debugPort = std::stoi(argv[++i]);
+        } else if (arg == "--debug") {
+            opts.debug = true;
         } else if ((arg == "run") && opts.command.empty()) {
             opts.command = "run";
         } else if ((arg == "compile" || arg == "--compile") && opts.command.empty()) {
@@ -1282,6 +1288,13 @@ int runScript(const CLIOptions& opts) {
         std::cout << std::endl;
     }
 
+    // Check for debug mode via environment variable
+    bool debugMode = opts.debug;
+    const char* debugEnv = std::getenv("MYSTRAL_DEBUG");
+    if (debugEnv && (std::string(debugEnv) == "1" || std::string(debugEnv) == "true")) {
+        debugMode = true;
+    }
+
     // Create runtime
     mystral::RuntimeConfig config;
     config.width = opts.width;
@@ -1289,6 +1302,7 @@ int runScript(const CLIOptions& opts) {
     config.title = opts.title.c_str();
     config.noSdl = opts.noSdl;
     config.watch = opts.watch;
+    config.debug = debugMode;
 
     auto runtime = mystral::Runtime::create(config);
     if (!runtime) {

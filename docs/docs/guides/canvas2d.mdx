@@ -1,0 +1,288 @@
+# Canvas 2D Game Engines
+
+Learn how to run Canvas 2D-based game engines like Impact.js in MystralNative.
+
+<video autoPlay loop muted playsInline style={{maxWidth: '600px', borderRadius: '8px', margin: '20px 0'}}>
+  <source src="/mystralnative/canvas2d-demo.mp4" type="video/mp4" />
+</video>
+
+## Overview
+
+MystralNative provides full Canvas 2D API support via Skia, automatically composited to WebGPU for display. This enables classic 2D game engines that use Canvas 2D (like Impact.js, Phaser 2, or custom engines) to run natively.
+
+## Requirements
+
+- MystralNative v0.1.0 or later (V8 + Dawn recommended)
+- A Canvas 2D-based game or demo
+
+## How It Works
+
+When your JavaScript calls `canvas.getContext('2d')`, MystralNative:
+
+1. Creates a Skia-backed raster surface for Canvas 2D drawing
+2. All Canvas 2D operations (fillRect, arc, fillText, etc.) render to this surface
+3. At the end of each frame, the surface is composited to the WebGPU surface for display
+
+This is completely automatic - no changes to your Canvas 2D code are needed.
+
+## Quick Start
+
+### 1. Create Your Canvas 2D Script
+
+Create a file called `my-game.js`:
+
+```javascript
+// Get the 2D context
+const ctx = canvas.getContext('2d');
+
+// Game state
+let time = 0;
+const entities = [];
+
+// Create bouncing circles
+for (let i = 0; i < 10; i++) {
+  entities.push({
+    x: Math.random() * canvas.width,
+    y: Math.random() * canvas.height,
+    vx: (Math.random() - 0.5) * 4,
+    vy: (Math.random() - 0.5) * 4,
+    color: `hsl(${Math.random() * 360}, 70%, 60%)`,
+    size: 20 + Math.random() * 30
+  });
+}
+
+function update() {
+  time += 0.016;
+
+  for (const e of entities) {
+    e.x += e.vx;
+    e.y += e.vy;
+
+    // Bounce off walls
+    if (e.x < 0 || e.x > canvas.width) e.vx *= -1;
+    if (e.y < 0 || e.y > canvas.height) e.vy *= -1;
+
+    e.x = Math.max(0, Math.min(canvas.width, e.x));
+    e.y = Math.max(0, Math.min(canvas.height, e.y));
+  }
+}
+
+function draw() {
+  const width = canvas.width;
+  const height = canvas.height;
+
+  // Clear with background color
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0, 0, width, height);
+
+  // Draw rotating square in center
+  ctx.save();
+  ctx.translate(width / 2, height / 2);
+  ctx.rotate(time);
+  ctx.fillStyle = '#00ff88';
+  ctx.fillRect(-50, -50, 100, 100);
+  ctx.restore();
+
+  // Draw entities (circles)
+  for (const e of entities) {
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, e.size / 2, 0, Math.PI * 2);
+    ctx.fillStyle = e.color;
+    ctx.fill();
+  }
+
+  // Draw text
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '28px sans-serif';
+  ctx.fillText('Canvas 2D Game', 50, 50);
+}
+
+function animate() {
+  update();
+  draw();
+  requestAnimationFrame(animate);
+}
+
+animate();
+```
+
+### 2. Run with MystralNative
+
+```bash
+mystral run my-game.js
+```
+
+You should see a rotating green square with colorful bouncing circles!
+
+## Supported Canvas 2D APIs
+
+The following Canvas 2D APIs are fully supported:
+
+### Drawing Rectangles
+- `fillRect(x, y, width, height)`
+- `strokeRect(x, y, width, height)`
+- `clearRect(x, y, width, height)`
+
+### Paths
+- `beginPath()`, `closePath()`
+- `moveTo(x, y)`, `lineTo(x, y)`
+- `arc(x, y, radius, startAngle, endAngle, counterclockwise)`
+- `arcTo(x1, y1, x2, y2, radius)`
+- `quadraticCurveTo(cpx, cpy, x, y)`
+- `bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x, y)`
+- `rect(x, y, width, height)`
+- `fill()`, `stroke()`
+
+### Styles
+- `fillStyle` - supports hex, rgb(), rgba(), hsl(), hsla(), and named colors
+- `strokeStyle` - same color formats
+- `lineWidth`
+- `globalAlpha`
+
+### Text
+- `fillText(text, x, y)`
+- `strokeText(text, x, y)`
+- `font` - CSS font strings (e.g., "28px sans-serif", "bold 16px Arial")
+- `textAlign`, `textBaseline`
+
+### Transformations
+- `save()`, `restore()`
+- `translate(x, y)`
+- `rotate(angle)` - angle in radians
+- `scale(x, y)`
+- `setTransform(a, b, c, d, e, f)`
+- `resetTransform()`
+
+### Pixel Manipulation
+- `getImageData(x, y, width, height)`
+- `putImageData(imageData, x, y)`
+- `createImageData(width, height)`
+
+### Images
+- `drawImage(image, x, y)` - for offscreen canvases
+
+## Color Formats
+
+MystralNative supports multiple color formats:
+
+```javascript
+// Hex colors
+ctx.fillStyle = '#ff0000';      // RGB
+ctx.fillStyle = '#ff0000ff';    // RGBA
+ctx.fillStyle = '#f00';         // Short RGB
+
+// RGB/RGBA
+ctx.fillStyle = 'rgb(255, 0, 0)';
+ctx.fillStyle = 'rgba(255, 0, 0, 0.5)';
+
+// HSL/HSLA
+ctx.fillStyle = 'hsl(120, 70%, 60%)';
+ctx.fillStyle = 'hsla(120, 70%, 60%, 0.5)';
+
+// Named colors
+ctx.fillStyle = 'red';
+ctx.fillStyle = 'transparent';
+```
+
+## Impact.js Compatibility
+
+MystralNative supports Impact.js-style game engines. The example above demonstrates common patterns used by Impact.js:
+
+- Entity-based game objects with position, velocity
+- Canvas 2D rendering for sprites and shapes
+- requestAnimationFrame game loop
+- Transform stack with save/restore
+
+### Polyfills for Impact.js
+
+If your Impact.js game needs DOM polyfills, you can add them at the start of your script:
+
+```javascript
+// DOM polyfills for Impact.js
+globalThis.document = globalThis.document || {};
+Object.assign(globalThis.document, {
+  getElementById: (id) => {
+    if (id === 'canvas' || id === '#canvas') {
+      return canvas;
+    }
+    return null;
+  },
+  createElement: (tag) => {
+    if (tag === 'canvas') {
+      // Return a mock canvas for offscreen rendering
+      return {
+        width: 64, height: 64,
+        getContext: (type) => null,
+        style: {}
+      };
+    }
+    return { style: {} };
+  },
+  body: { appendChild: () => {}, style: {} }
+});
+globalThis.window = globalThis.window || globalThis;
+```
+
+## Key Differences from Browser
+
+| Browser | MystralNative |
+|---------|---------------|
+| Canvas renders to OS window | Canvas renders via Skia, composited to WebGPU |
+| All Canvas 2D features | Core Canvas 2D (no filters, shadows yet) |
+| Immediate display | Composited at end of frame |
+| WebGL fallback available | Canvas 2D only (WebGPU for 3D) |
+
+## Combining Canvas 2D and WebGPU
+
+MystralNative supports hybrid rendering where you can use Canvas 2D for UI overlays or 2D game elements alongside WebGPU 3D rendering. The Canvas 2D content is automatically composited on top of the WebGPU content.
+
+## Troubleshooting
+
+### Black Screen
+
+If you see a black screen:
+
+1. Ensure you're calling drawing functions inside the animation loop
+2. Check that `canvas.getContext('2d')` is called (not 'webgpu')
+3. Verify your animation loop is running (`requestAnimationFrame`)
+
+### Missing Colors
+
+If shapes appear in wrong colors or black:
+
+1. Check your color format syntax (HSL needs `%` for saturation/lightness)
+2. Ensure fillStyle/strokeStyle is set before drawing
+3. For HSL: `hsl(180, 50%, 50%)` not `hsl(180, 50, 50)`
+
+### Transform Issues
+
+If shapes appear in wrong positions:
+
+1. Use `save()` before transforms
+2. Use `restore()` after drawing
+3. Transforms are cumulative - reset if needed with `setTransform(1,0,0,1,0,0)`
+
+## Performance Tips
+
+```javascript
+// Batch similar operations
+ctx.fillStyle = '#ff0000';
+for (const entity of redEntities) {
+  ctx.fillRect(entity.x, entity.y, 32, 32);
+}
+
+// Avoid changing styles frequently
+// Group draws by color when possible
+```
+
+## Version Compatibility
+
+| MystralNative | Canvas 2D Support |
+|---------------|-------------------|
+| v0.1.0+       | Full support with Skia backend |
+
+## Next Steps
+
+- [Running Games](/mystralnative/docs/guides/running-games) - More CLI options
+- [Three.js Guide](/mystralnative/docs/guides/threejs) - Using Three.js with MystralNative
+- [PixiJS Guide](/mystralnative/docs/guides/pixijs) - Using PixiJS with MystralNative

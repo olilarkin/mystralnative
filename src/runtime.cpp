@@ -136,7 +136,7 @@ static void installCrashHandlers() {
 
 // Forward declaration for WebGPU bindings
 namespace webgpu {
-    bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void* wgpuQueue, void* wgpuSurface, uint32_t surfaceFormat, uint32_t width, uint32_t height);
+    bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void* wgpuQueue, void* wgpuSurface, uint32_t surfaceFormat, uint32_t width, uint32_t height, bool debug = false);
     void setOffscreenTexture(void* texture, void* textureView);
     void beginDawnFrame();
     void endDawnFrame();
@@ -419,7 +419,7 @@ public:
         // Set up WebGPU bindings in JS
         // For no-SDL mode, pass nullptr for surface (offscreen rendering uses texture directly)
         WGPUSurface surface = config_.noSdl ? nullptr : webgpu_->getSurface();
-        if (!webgpu::initBindings(jsEngine_.get(), webgpu_->getInstance(), webgpu_->getDevice(), webgpu_->getQueue(), surface, webgpu_->getPreferredFormat(), width_, height_)) {
+        if (!webgpu::initBindings(jsEngine_.get(), webgpu_->getInstance(), webgpu_->getDevice(), webgpu_->getQueue(), surface, webgpu_->getPreferredFormat(), width_, height_, config_.debug)) {
             std::cerr << "[Mystral] Failed to initialize WebGPU bindings" << std::endl;
             return false;
         }
@@ -2964,12 +2964,11 @@ globalThis.__mystralNativeDecodeDracoAsync = function(buffer, attrs) {
                 // std::cout << "[DOM] getElementById('" << id << "')" << std::endl;
 
                 // Return canvas element for "canvas" or any canvas-like id
-                if (id == "canvas" || id == "engine-canvas" || id == "game-canvas") {
-                    // std::cout << "[DOM] Returning canvas element, ptr=" << canvasElement_.ptr << std::endl;
+                // Also handle '#canvas' prefix (common in jQuery-style code)
+                if (id == "canvas" || id == "#canvas" || id == "engine-canvas" || id == "game-canvas") {
                     return canvasElement_;
                 }
 
-                // std::cout << "[DOM] Unknown element id: " << id << std::endl;
                 return jsEngine_->newNull();
             })
         );
@@ -2998,7 +2997,38 @@ globalThis.__mystralNativeDecodeDracoAsync = function(buffer, attrs) {
         // document.body (for compatibility)
         auto body = jsEngine_->newObject();
         jsEngine_->setProperty(body, "tagName", jsEngine_->newString("BODY"));
+        jsEngine_->setProperty(body, "appendChild", jsEngine_->newFunction("appendChild", [this](void*, const std::vector<js::JSValueHandle>&) {
+            return jsEngine_->newUndefined();
+        }));
+        jsEngine_->setProperty(body, "style", jsEngine_->newObject());
         jsEngine_->setProperty(document, "body", body);
+
+        // document.head (for script loading)
+        auto head = jsEngine_->newObject();
+        jsEngine_->setProperty(head, "tagName", jsEngine_->newString("HEAD"));
+        jsEngine_->setProperty(head, "appendChild", jsEngine_->newFunction("appendChild", [this](void*, const std::vector<js::JSValueHandle>& args) {
+            // For script loading, call onload callback asynchronously
+            if (!args.empty()) {
+                auto el = args[0];
+                auto onload = jsEngine_->getProperty(el, "onload");
+                if (!jsEngine_->isUndefined(onload) && !jsEngine_->isNull(onload)) {
+                    // Call onload via setTimeout to simulate async loading
+                    jsEngine_->eval("setTimeout(() => { arguments[0] && arguments[0](); }, 0);", "onload-trigger");
+                }
+            }
+            return jsEngine_->newUndefined();
+        }));
+        jsEngine_->setProperty(document, "head", head);
+
+        // document.location (for URL information)
+        auto location = jsEngine_->newObject();
+        jsEngine_->setProperty(location, "href", jsEngine_->newString("file:///game.html"));
+        jsEngine_->setProperty(location, "protocol", jsEngine_->newString("file:"));
+        jsEngine_->setProperty(location, "host", jsEngine_->newString(""));
+        jsEngine_->setProperty(location, "hostname", jsEngine_->newString(""));
+        jsEngine_->setProperty(location, "pathname", jsEngine_->newString("/game.html"));
+        jsEngine_->setProperty(location, "origin", jsEngine_->newString("file://"));
+        jsEngine_->setProperty(document, "location", location);
 
         jsEngine_->setGlobalProperty("document", document);
 
@@ -3009,15 +3039,41 @@ globalThis.__mystralNativeDecodeDracoAsync = function(buffer, attrs) {
                 if (tagName === 'canvas') {
                     return {
                         tagName: 'CANVAS',
-                        width: 0,
-                        height: 0,
+                        width: 64,
+                        height: 64,
+                        style: {},
                         toDataURL: function(mimeType) {
                             return __nativeCanvasToDataURL(mimeType || 'image/png');
                         },
                         getContext: function(type) { return null; }
                     };
                 }
-                return { tagName: (tagName || '').toUpperCase() };
+                if (tagName === 'script') {
+                    return {
+                        tagName: 'SCRIPT',
+                        src: '',
+                        type: '',
+                        async: false,
+                        onload: null,
+                        onerror: null
+                    };
+                }
+                if (tagName === 'style') {
+                    return {
+                        tagName: 'STYLE',
+                        type: 'text/css',
+                        textContent: ''
+                    };
+                }
+                if (tagName === 'div' || tagName === 'span' || tagName === 'img') {
+                    return {
+                        tagName: (tagName || '').toUpperCase(),
+                        style: {},
+                        className: '',
+                        id: ''
+                    };
+                }
+                return { tagName: (tagName || '').toUpperCase(), style: {} };
             };
         )";
         jsEngine_->eval(createElementSetup, "createElement-setup");

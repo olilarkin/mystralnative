@@ -103,6 +103,35 @@ static Color parseColor(const std::string& colorStr) {
         return color;
     }
 
+    // Handle hsl(h, s%, l%) and hsla(h, s%, l%, a)
+    std::regex hslRegex(R"(hsla?\s*\(\s*([\d.]+)\s*,\s*([\d.]+)%?\s*,\s*([\d.]+)%?\s*(?:,\s*([\d.]+))?\s*\))");
+    if (std::regex_match(colorStr, match, hslRegex)) {
+        float h = std::fmod(std::stof(match[1]), 360.0f);
+        if (h < 0) h += 360.0f;
+        float s = std::stof(match[2]) / 100.0f;
+        float l = std::stof(match[3]) / 100.0f;
+        float a = match[4].matched ? std::stof(match[4]) : 1.0f;
+
+        // HSL to RGB conversion
+        float c = (1.0f - std::fabs(2.0f * l - 1.0f)) * s;
+        float x = c * (1.0f - std::fabs(std::fmod(h / 60.0f, 2.0f) - 1.0f));
+        float m = l - c / 2.0f;
+
+        float r1, g1, b1;
+        if (h < 60)       { r1 = c; g1 = x; b1 = 0; }
+        else if (h < 120) { r1 = x; g1 = c; b1 = 0; }
+        else if (h < 180) { r1 = 0; g1 = c; b1 = x; }
+        else if (h < 240) { r1 = 0; g1 = x; b1 = c; }
+        else if (h < 300) { r1 = x; g1 = 0; b1 = c; }
+        else              { r1 = c; g1 = 0; b1 = x; }
+
+        color.r = static_cast<uint8_t>((r1 + m) * 255);
+        color.g = static_cast<uint8_t>((g1 + m) * 255);
+        color.b = static_cast<uint8_t>((b1 + m) * 255);
+        color.a = static_cast<uint8_t>(a * 255);
+        return color;
+    }
+
     // Named colors (basic set)
     if (colorStr == "black") { color.r = 0; color.g = 0; color.b = 0; }
     else if (colorStr == "white") { color.r = 255; color.g = 255; color.b = 255; }
@@ -323,6 +352,11 @@ void Canvas2DContext::resize(int width, int height) {
 // State Management
 void Canvas2DContext::save() {
     impl_->stateStack.push(impl_->currentState);
+#if defined(MYSTRAL_HAS_SKIA)
+    if (impl_->canvas) {
+        impl_->canvas->save();  // Save Skia canvas transform state
+    }
+#endif
 }
 
 void Canvas2DContext::restore() {
@@ -330,6 +364,9 @@ void Canvas2DContext::restore() {
         impl_->currentState = impl_->stateStack.top();
         impl_->stateStack.pop();
 #if defined(MYSTRAL_HAS_SKIA)
+        if (impl_->canvas) {
+            impl_->canvas->restore();  // Restore Skia canvas transform state
+        }
         impl_->updateFont();
 #endif
     }
@@ -561,6 +598,8 @@ void Canvas2DContext::bezierCurveTo(float cp1x, float cp1y, float cp2x, float cp
 
 void Canvas2DContext::arc(float x, float y, float radius, float startAngle, float endAngle, bool counterclockwise) {
 #if defined(MYSTRAL_HAS_SKIA)
+    if (radius <= 0) return;
+
     SkRect oval = SkRect::MakeLTRB(x - radius, y - radius, x + radius, y + radius);
 
     // Convert radians to degrees
@@ -573,7 +612,25 @@ void Canvas2DContext::arc(float x, float y, float radius, float startAngle, floa
         sweepDeg += 360.0f;
     }
 
-    impl_->pathBuilder.arcTo(oval, startDeg, sweepDeg, false);
+    // For a full circle (or near-full), use addOval for better results
+    if (std::fabs(sweepDeg) >= 359.9f) {
+        impl_->pathBuilder.addOval(oval);
+    } else {
+        // For partial arcs, compute the start point and move there first
+        float startRad = startAngle;
+        float startX = x + radius * std::cos(startRad);
+        float startY = y + radius * std::sin(startRad);
+
+        // If path is empty, move to start point; otherwise line to it
+        SkPath currentPath = impl_->pathBuilder.snapshot();
+        if (currentPath.isEmpty()) {
+            impl_->pathBuilder.moveTo(startX, startY);
+        } else {
+            impl_->pathBuilder.lineTo(startX, startY);
+        }
+
+        impl_->pathBuilder.arcTo(oval, startDeg, sweepDeg, false);
+    }
 #endif
 }
 
@@ -706,7 +763,6 @@ const uint8_t* Canvas2DContext::getPixelData() const {
     if (!impl_->surface) return nullptr;
 
     // For raster surfaces, we can directly peek at the pixels
-    // No flush needed for CPU-only surfaces
     SkPixmap pixmap;
     if (impl_->surface->peekPixels(&pixmap)) {
         return static_cast<const uint8_t*>(pixmap.addr());

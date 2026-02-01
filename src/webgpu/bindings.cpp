@@ -80,8 +80,8 @@ WGPUBool wgpuDevicePoll(WGPUDevice device, WGPUBool wait, WGPUWrappedSubmissionI
 namespace mystral {
 namespace webgpu {
 
-// Verbose logging flag - set to true for debugging render pass operations
-static bool g_verboseLogging = true;  // Enable for debugging
+// Verbose logging flag - controlled by --debug CLI flag or MYSTRAL_DEBUG=1
+static bool g_verboseLogging = false;  // Disabled by default, enable with --debug
 
 // Store references to WebGPU objects
 static WGPUDevice g_device = nullptr;
@@ -132,6 +132,9 @@ static bool g_screenshotReady = false;
 // Prevent capturing multiple screenshots per frame (Three.js does multiple queue.submit() per frame)
 static bool g_screenshotCapturedThisFrame = false;
 static std::vector<uint8_t> g_screenshotData;
+
+// Main canvas 2D context (for Canvas 2D to WebGPU compositing)
+static canvas::Canvas2DContext* g_mainCanvas2DContext = nullptr;
 
 // Texture registry for tracking user-created textures
 // Maps texture ID to {texture, format, dimensions, etc.}
@@ -345,13 +348,16 @@ static WGPUTexture getCurrentSwapchainTexture() {
 /**
  * Initialize WebGPU bindings in the JS engine
  */
-bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void* wgpuQueue, void* wgpuSurface, uint32_t surfaceFormat, uint32_t width, uint32_t height) {
+bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void* wgpuQueue, void* wgpuSurface, uint32_t surfaceFormat, uint32_t width, uint32_t height, bool debug) {
     if (!engine) {
         std::cerr << "[WebGPU] No JS engine provided for bindings" << std::endl;
         return false;
     }
 
 #if defined(MYSTRAL_WEBGPU_WGPU) || defined(MYSTRAL_WEBGPU_DAWN)
+    // Set verbose logging based on debug flag
+    g_verboseLogging = debug;
+
     g_engine = engine;
     g_instance = (WGPUInstance)wgpuInstance;
     g_device = (WGPUDevice)wgpuDevice;
@@ -363,8 +369,10 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
     g_canvasHeight = height;
     g_surfaceFormat = (WGPUTextureFormat)surfaceFormat;
 
-    std::cout << "[WebGPU] Initializing JavaScript bindings..." << std::endl;
-    std::cout << "[WebGPU] Surface format: " << surfaceFormat << std::endl;
+    if (g_verboseLogging) {
+        std::cout << "[WebGPU] Initializing JavaScript bindings..." << std::endl;
+        std::cout << "[WebGPU] Surface format: " << surfaceFormat << std::endl;
+    }
 
     // ========================================================================
     // Create a mock parent element for the canvas (needed by Debugger)
@@ -426,12 +434,16 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
 
             // Handle Canvas 2D context
             if (contextType == "2d") {
-                std::cout << "[Canvas] Creating 2D context (" << g_canvasWidth << "x" << g_canvasHeight << ")" << std::endl;
+                if (g_verboseLogging) std::cout << "[Canvas] Creating 2D context (" << g_canvasWidth << "x" << g_canvasHeight << ")" << std::endl;
                 auto ctx2d = canvas::createCanvas2DContext(g_engine, g_canvasWidth, g_canvasHeight);
 
                 // Set reference back to canvas
                 auto canvas = g_engine->getGlobalProperty("canvas");
                 g_engine->setProperty(ctx2d, "canvas", canvas);
+
+                // Store the native context for Canvas 2D to WebGPU compositing
+                g_mainCanvas2DContext = static_cast<canvas::Canvas2DContext*>(g_engine->getPrivateData(ctx2d));
+                if (g_verboseLogging) std::cout << "[Canvas] Main canvas using 2D context - will composite to WebGPU" << std::endl;
 
                 return ctx2d;
             }
@@ -467,7 +479,7 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                     // Note: alphaMode and device are stored but surface is already configured
 
                     g_contextConfigured = true;
-                    std::cout << "[Canvas] Context configured with format: " << format << std::endl;
+                    if (g_verboseLogging) std::cout << "[Canvas] Context configured with format: " << format << std::endl;
 
                     return g_engine->newUndefined();
                 })
@@ -494,7 +506,7 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                     g_currentTexture = texture;
                     static int frameCount = 0;
                     if (frameCount++ < 3) {
-                        std::cout << "[Canvas] Got texture: " << texture << std::endl;
+                        if (g_verboseLogging) std::cout << "[Canvas] Got texture: " << texture << std::endl;
                     }
 
                     // Register in texture registry so createView can find it
@@ -569,7 +581,7 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                 })
             );
 
-            std::cout << "[Canvas] WebGPU context created" << std::endl;
+            if (g_verboseLogging) std::cout << "[Canvas] WebGPU context created" << std::endl;
             return canvasContext;
         })
     );
@@ -707,7 +719,7 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                         }
 
                         // Create Canvas 2D context
-                        std::cout << "[Canvas] Creating offscreen 2D context (" << canvas->width << "x" << canvas->height << ")" << std::endl;
+                        if (g_verboseLogging) std::cout << "[Canvas] Creating offscreen 2D context (" << canvas->width << "x" << canvas->height << ")" << std::endl;
                         canvas->context2d = canvas::createCanvas2DContext(g_engine, canvas->width, canvas->height);
                         canvas->hasContext2d = true;
                         g_engine->protect(canvas->context2d);
@@ -717,7 +729,7 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                     if (contextType == "webgpu") {
                         // Create GPUCanvasContext for offscreen canvas
                         // This shares the main surface/device for simplicity
-                        std::cout << "[Canvas] Creating offscreen WebGPU context" << std::endl;
+                        if (g_verboseLogging) std::cout << "[Canvas] Creating offscreen WebGPU context" << std::endl;
 
                         // Suspend frame tracking - this context persists across frames
                         g_engine->suspendFrameTracking();
@@ -743,7 +755,7 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                 std::string format = g_engine->toString(g_engine->getProperty(descriptor, "format"));
                                 g_surfaceFormat = stringToFormat(format);
                                 g_contextConfigured = true;
-                                std::cout << "[Canvas] Offscreen context configured with format: " << format << std::endl;
+                                if (g_verboseLogging) std::cout << "[Canvas] Offscreen context configured with format: " << format << std::endl;
                                 return g_engine->newUndefined();
                             })
                         );
@@ -764,7 +776,7 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                     return g_engine->newUndefined();
                                 }
                                 g_currentTexture = texture;
-                                std::cout << "[Canvas] Offscreen got texture: " << (void*)texture << std::endl;
+                                if (g_verboseLogging) std::cout << "[Canvas] Offscreen got texture: " << (void*)texture << std::endl;
 
                                 // Register in texture registry so createView can find it
                                 uint64_t textureId = g_nextTextureId++;
@@ -816,7 +828,7 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                         WGPUTextureView view = wgpuTextureCreateView(texture, &viewDesc);
                                         g_currentTextureView = view;
                                         g_currentViewSourceTexture = texture;  // Track which texture the view was created from
-                                        std::cout << "[Canvas] Offscreen createView: texture=" << (void*)texture
+                                        if (g_verboseLogging) std::cout << "[Canvas] Offscreen createView: texture=" << (void*)texture
                                                   << ", view=" << (void*)view << std::endl;
 
                                         auto jsView = g_engine->newObject();
@@ -859,7 +871,7 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                 });
 
                 g_engine->setProperty(element, "getContext", getContextFn);
-                std::cout << "[Canvas] Created offscreen canvas " << canvasId << std::endl;
+                if (g_verboseLogging) std::cout << "[Canvas] Created offscreen canvas " << canvasId << std::endl;
 
                 // toDataURL for compatibility (returns empty data URI)
                 g_engine->setProperty(element, "toDataURL",
@@ -999,9 +1011,9 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
 #elif defined(MYSTRAL_WEBGPU_WGPU)
                                 wgpuDevicePoll(g_device, false, nullptr);
 #endif
-                                std::cout << "[WebGPU] Submit #" << submitCount << ": " << cmdBuffers.size() << " command buffers, g_currentTexture=" << (void*)g_currentTexture << std::endl;
+                                if (g_verboseLogging) std::cout << "[WebGPU] Submit #" << submitCount << ": " << cmdBuffers.size() << " command buffers, g_currentTexture=" << (void*)g_currentTexture << std::endl;
                             } else {
-                                std::cout << "[WebGPU] Submit #" << submitCount << ": EMPTY (length=" << length << "), g_currentTexture=" << (void*)g_currentTexture << std::endl;
+                                if (g_verboseLogging) std::cout << "[WebGPU] Submit #" << submitCount << ": EMPTY (length=" << length << "), g_currentTexture=" << (void*)g_currentTexture << std::endl;
                             }
 
                             // Copy texture to screenshot buffer ONLY when about to present
@@ -1052,7 +1064,7 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                 WGPUExtent3D copySize = {g_canvasWidth, g_canvasHeight, 1};
                                 wgpuCommandEncoderCopyTextureToBuffer(copyEncoder, &srcCopy, &dstCopy, &copySize);
 
-                                std::cout << "[Screenshot] Copying from texture " << (void*)screenshotTexture
+                                if (g_verboseLogging) std::cout << "[Screenshot] Copying from texture " << (void*)screenshotTexture
                                           << " (format=" << g_surfaceFormat << ", size=" << g_canvasWidth << "x" << g_canvasHeight << ")" << std::endl;
 
                                 WGPUCommandBufferDescriptor cmdDesc = {};
@@ -1084,7 +1096,7 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                             // 2. The surface render pass has been ended (commands submitted)
                             // This prevents presenting before the render commands are in this submit
                             if (g_surface && g_currentTexture && g_surfaceRenderPassEnded) {
-                                std::cout << "[WebGPU] Presenting surface" << std::endl;
+                                if (g_verboseLogging) std::cout << "[WebGPU] Presenting surface" << std::endl;
                                 wgpuSurfacePresent(g_surface);
 
                                 // Reset surface render tracking for next frame
@@ -1710,7 +1722,7 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                             std::string code = g_engine->toString(g_engine->getProperty(descriptor, "code"));
 
                             // Debug: Print first 500 chars of shader code
-                            if (code.length() > 0) {
+                            if (g_verboseLogging && code.length() > 0) {
                                 std::cout << "[Shader] Creating shader (" << code.length() << " chars):\n"
                                           << code.substr(0, std::min((size_t)500, code.length()))
                                           << (code.length() > 500 ? "\n..." : "") << std::endl;
@@ -2307,11 +2319,13 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                         auto viewHandle = g_engine->getProperty(attachment, "view");
                                         WGPUTextureView view = (WGPUTextureView)g_engine->getPrivateData(viewHandle);
 
-                                        // Debug: Always log first color attachment for comparison with g_currentTextureView
+                                        // Debug: Log first color attachment for comparison with g_currentTextureView
                                         if (i == 0) {
-                                            std::cout << "[WebGPU] Render pass attachment[0]: view=" << (void*)view
-                                                      << ", g_currentTextureView=" << (void*)g_currentTextureView
-                                                      << ", matches=" << (view == g_currentTextureView ? "YES" : "NO") << std::endl;
+                                            if (g_verboseLogging) {
+                                                std::cout << "[WebGPU] Render pass attachment[0]: view=" << (void*)view
+                                                          << ", g_currentTextureView=" << (void*)g_currentTextureView
+                                                          << ", matches=" << (view == g_currentTextureView ? "YES" : "NO") << std::endl;
+                                            }
 
                                             // Track if this render pass uses the surface texture
                                             if (view == g_currentTextureView && g_currentTextureView != nullptr) {
@@ -2914,10 +2928,12 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                     }
                                     if (depthOrLayers == 0) depthOrLayers = 1;
 
-                                    std::cout << "[WebGPU] copyTextureToBuffer: texture=" << texture
-                                              << ", buffer=" << buffer
-                                              << ", size=" << width << "x" << height << "x" << depthOrLayers
-                                              << ", bytesPerRow=" << bytesPerRow << std::endl;
+                                    if (g_verboseLogging) {
+                                        std::cout << "[WebGPU] copyTextureToBuffer: texture=" << texture
+                                                  << ", buffer=" << buffer
+                                                  << ", size=" << width << "x" << height << "x" << depthOrLayers
+                                                  << ", bytesPerRow=" << bytesPerRow << std::endl;
+                                    }
 
                                     if (buffer && texture) {
                                         WGPUImageCopyTexture_Compat srcCopy = {};
@@ -3033,7 +3049,7 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                     auto renderPassIt = g_encoderRenderPassMap.find(encoderToFinish);
                                     if (renderPassIt != g_encoderRenderPassMap.end() && renderPassIt->second) {
                                         WGPURenderPassEncoder renderPass = renderPassIt->second;
-                                        std::cout << "[WebGPU] Auto-ending render pass (pass=" << (void*)renderPass << ", encoder=" << (void*)encoderToFinish << ")" << std::endl;
+                                        if (g_verboseLogging) std::cout << "[WebGPU] Auto-ending render pass (pass=" << (void*)renderPass << ", encoder=" << (void*)encoderToFinish << ")" << std::endl;
                                         wgpuRenderPassEncoderEnd(renderPass);
                                         wgpuRenderPassEncoderRelease(renderPass);
                                         g_encoderRenderPassMap.erase(renderPassIt);
@@ -3046,14 +3062,14 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                                         // Mark surface render pass as ended
                                         if (g_surfaceRenderEncoder == encoderToFinish) {
                                             g_surfaceRenderPassEnded = true;
-                                            std::cout << "[WebGPU] Surface render pass auto-ended (encoder=" << (void*)encoderToFinish << ")" << std::endl;
+                                            if (g_verboseLogging) std::cout << "[WebGPU] Surface render pass auto-ended (encoder=" << (void*)encoderToFinish << ")" << std::endl;
                                         }
                                     }
 
                                     auto computePassIt = g_encoderComputePassMap.find(encoderToFinish);
                                     if (computePassIt != g_encoderComputePassMap.end() && computePassIt->second) {
                                         WGPUComputePassEncoder computePass = computePassIt->second;
-                                        std::cout << "[WebGPU] Auto-ending compute pass (pass=" << (void*)computePass << ", encoder=" << (void*)encoderToFinish << ")" << std::endl;
+                                        if (g_verboseLogging) std::cout << "[WebGPU] Auto-ending compute pass (pass=" << (void*)computePass << ", encoder=" << (void*)encoderToFinish << ")" << std::endl;
                                         wgpuComputePassEncoderEnd(computePass);
                                         wgpuComputePassEncoderRelease(computePass);
                                         g_encoderComputePassMap.erase(computePassIt);
@@ -4172,7 +4188,7 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                     g_engine->throwException("Failed to decode WebP image");
                     return g_engine->newUndefined();
                 }
-                std::cout << "[createImageBitmap] Decoded WebP " << width << "x" << height << " image" << std::endl;
+                if (g_verboseLogging) std::cout << "[createImageBitmap] Decoded WebP " << width << "x" << height << " image" << std::endl;
 #else
                 g_engine->throwException("WebP image detected but libwebp support not compiled in. Rebuild with MYSTRAL_HAS_WEBP.");
                 return g_engine->newUndefined();
@@ -4186,7 +4202,7 @@ bool initBindings(js::Engine* engine, void* wgpuInstance, void* wgpuDevice, void
                     g_engine->throwException(error.c_str());
                     return g_engine->newUndefined();
                 }
-                std::cout << "[createImageBitmap] Decoded " << width << "x" << height << " image" << std::endl;
+                if (g_verboseLogging) std::cout << "[createImageBitmap] Decoded " << width << "x" << height << " image" << std::endl;
             }
 
             // Create ImageBitmap-like object
@@ -4318,7 +4334,7 @@ globalThis.OffscreenCanvas = OffscreenCanvas;
             }
 
             std::string path = g_engine->toString(args[0]);
-            std::cout << "[GLTF] Loading: " << path << std::endl;
+            if (g_verboseLogging) std::cout << "[GLTF] Loading: " << path << std::endl;
 
             auto gltfData = mystral::gltf::loadGLTF(path);
             if (!gltfData) {
@@ -4533,9 +4549,11 @@ globalThis.OffscreenCanvas = OffscreenCanvas;
             g_engine->setProperty(result, "scenes", jsScenes);
             g_engine->setProperty(result, "defaultScene", g_engine->newNumber(gltfData->defaultScene));
 
-            std::cout << "[GLTF] Loaded " << gltfData->meshes.size() << " meshes, "
-                      << gltfData->materials.size() << " materials, "
-                      << gltfData->images.size() << " images" << std::endl;
+            if (g_verboseLogging) {
+                std::cout << "[GLTF] Loaded " << gltfData->meshes.size() << " meshes, "
+                          << gltfData->materials.size() << " materials, "
+                          << gltfData->images.size() << " images" << std::endl;
+            }
 
             return result;
         })
@@ -4590,7 +4608,7 @@ globalThis.OffscreenCanvas = OffscreenCanvas;
             }
 
             // Create Canvas 2D context with current dimensions
-            std::cout << "[Canvas] Creating offscreen 2D context (" << canvas->width << "x" << canvas->height << ")" << std::endl;
+            if (g_verboseLogging) std::cout << "[Canvas] Creating offscreen 2D context (" << canvas->width << "x" << canvas->height << ")" << std::endl;
             canvas->context2d = canvas::createCanvas2DContext(g_engine, canvas->width, canvas->height);
             canvas->hasContext2d = true;
             g_engine->protect(canvas->context2d);
@@ -4616,7 +4634,7 @@ globalThis.OffscreenCanvas = OffscreenCanvas;
                 height = static_cast<int>(g_engine->toNumber(args[1]));
             }
 
-            std::cout << "[Canvas] Creating offscreen 2D canvas (" << width << "x" << height << ")" << std::endl;
+            if (g_verboseLogging) std::cout << "[Canvas] Creating offscreen 2D canvas (" << width << "x" << height << ")" << std::endl;
 
             // Create a wrapper object that mimics a canvas with a 2D context
             auto canvasWrapper = g_engine->newObject();
@@ -4640,12 +4658,14 @@ globalThis.OffscreenCanvas = OffscreenCanvas;
         })
     );
 
-    std::cout << "[WebGPU] JavaScript bindings initialized" << std::endl;
-    std::cout << "[WebGPU] createImageBitmap() available for image decoding" << std::endl;
+    if (g_verboseLogging) {
+        std::cout << "[WebGPU] JavaScript bindings initialized" << std::endl;
+        std::cout << "[WebGPU] createImageBitmap() available for image decoding" << std::endl;
+    }
 
     return true;
 #else
-    std::cout << "[WebGPU] No WebGPU backend available" << std::endl;
+    std::cerr << "[WebGPU] No WebGPU backend available" << std::endl;
     return true;
 #endif
 }
@@ -4695,7 +4715,7 @@ void clearScreenshotReady() {
 void setOffscreenTexture(void* texture, void* textureView) {
     g_offscreenTexture = (WGPUTexture)texture;
     g_offscreenTextureView = (WGPUTextureView)textureView;
-    std::cout << "[WebGPU] Offscreen texture set for headless rendering" << std::endl;
+    if (g_verboseLogging) std::cout << "[WebGPU] Offscreen texture set for headless rendering" << std::endl;
 }
 
 void beginDawnFrame() {
@@ -4704,7 +4724,316 @@ void beginDawnFrame() {
     // their JS wrapper objects are garbage collected.
 }
 
+// Canvas 2D compositing resources
+static WGPUTexture g_canvas2DTexture = nullptr;
+static WGPURenderPipeline g_canvas2DPipeline = nullptr;
+static WGPUBindGroup g_canvas2DBindGroup = nullptr;
+static WGPUSampler g_canvas2DSampler = nullptr;
+static uint32_t g_canvas2DTextureWidth = 0;
+static uint32_t g_canvas2DTextureHeight = 0;
+
+void compositeCanvas2DToWebGPU() {
+    if (!g_mainCanvas2DContext || !g_device || !g_queue || !g_surface) {
+        return;
+    }
+
+    // Get Canvas 2D pixel data
+    const uint8_t* pixelData = g_mainCanvas2DContext->getPixelData();
+    size_t pixelDataSize = g_mainCanvas2DContext->getPixelDataSize();
+    int width = g_mainCanvas2DContext->getWidth();
+    int height = g_mainCanvas2DContext->getHeight();
+
+    if (!pixelData || pixelDataSize == 0) {
+        return;
+    }
+
+    // Create or resize texture if needed
+    if (!g_canvas2DTexture || g_canvas2DTextureWidth != (uint32_t)width || g_canvas2DTextureHeight != (uint32_t)height) {
+        if (g_canvas2DTexture) {
+            wgpuTextureDestroy(g_canvas2DTexture);
+            wgpuTextureRelease(g_canvas2DTexture);
+        }
+        if (g_canvas2DBindGroup) {
+            wgpuBindGroupRelease(g_canvas2DBindGroup);
+            g_canvas2DBindGroup = nullptr;
+        }
+
+        WGPUTextureDescriptor texDesc = {};
+        texDesc.size = {(uint32_t)width, (uint32_t)height, 1};
+        texDesc.mipLevelCount = 1;
+        texDesc.sampleCount = 1;
+        texDesc.dimension = WGPUTextureDimension_2D;
+        texDesc.format = WGPUTextureFormat_RGBA8Unorm;
+        texDesc.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
+
+        g_canvas2DTexture = wgpuDeviceCreateTexture(g_device, &texDesc);
+        g_canvas2DTextureWidth = width;
+        g_canvas2DTextureHeight = height;
+    }
+
+    // Upload pixel data to texture
+    WGPUImageCopyTexture_Compat destTexture = {};
+    destTexture.texture = g_canvas2DTexture;
+    destTexture.mipLevel = 0;
+    destTexture.origin = {0, 0, 0};
+    destTexture.aspect = WGPUTextureAspect_All;
+
+    WGPUTextureDataLayout_Compat dataLayout = {};
+    dataLayout.offset = 0;
+    dataLayout.bytesPerRow = width * 4;
+    dataLayout.rowsPerImage = height;
+
+    WGPUExtent3D writeSize = {(uint32_t)width, (uint32_t)height, 1};
+    wgpuQueueWriteTexture(g_queue, &destTexture, pixelData, pixelDataSize, &dataLayout, &writeSize);
+
+    // Create pipeline if needed
+    if (!g_canvas2DPipeline) {
+        // Simple fullscreen quad shader
+        const char* shaderCode = R"(
+            @group(0) @binding(0) var texSampler: sampler;
+            @group(0) @binding(1) var tex: texture_2d<f32>;
+
+            struct VertexOutput {
+                @builtin(position) position: vec4f,
+                @location(0) uv: vec2f,
+            }
+
+            @vertex
+            fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+                var positions = array<vec2f, 6>(
+                    vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
+                    vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0)
+                );
+                var uvs = array<vec2f, 6>(
+                    vec2f(0.0, 1.0), vec2f(1.0, 1.0), vec2f(0.0, 0.0),
+                    vec2f(0.0, 0.0), vec2f(1.0, 1.0), vec2f(1.0, 0.0)
+                );
+                var output: VertexOutput;
+                output.position = vec4f(positions[vertexIndex], 0.0, 1.0);
+                output.uv = uvs[vertexIndex];
+                return output;
+            }
+
+            @fragment
+            fn fs_main(input: VertexOutput) -> @location(0) vec4f {
+                return textureSample(tex, texSampler, input.uv);
+            }
+        )";
+
+        WGPUShaderModuleWGSLDescriptor_Compat wgslDesc = {};
+        WGPUShaderModuleDescriptor shaderDesc = {};
+        setupShaderModuleWGSL(&shaderDesc, &wgslDesc, shaderCode);
+
+        WGPUShaderModule shaderModule = wgpuDeviceCreateShaderModule(g_device, &shaderDesc);
+
+        // Create sampler
+        WGPUSamplerDescriptor samplerDesc = {};
+        samplerDesc.magFilter = WGPUFilterMode_Linear;
+        samplerDesc.minFilter = WGPUFilterMode_Linear;
+        samplerDesc.mipmapFilter = WGPUMipmapFilterMode_Linear;
+        samplerDesc.addressModeU = WGPUAddressMode_ClampToEdge;
+        samplerDesc.addressModeV = WGPUAddressMode_ClampToEdge;
+        samplerDesc.addressModeW = WGPUAddressMode_ClampToEdge;
+        samplerDesc.maxAnisotropy = 1;
+        samplerDesc.lodMinClamp = 0.0f;
+        samplerDesc.lodMaxClamp = 1.0f;
+        g_canvas2DSampler = wgpuDeviceCreateSampler(g_device, &samplerDesc);
+
+        // Create bind group layout
+        WGPUBindGroupLayoutEntry bgLayoutEntries[2] = {};
+        bgLayoutEntries[0].binding = 0;
+        bgLayoutEntries[0].visibility = WGPUShaderStage_Fragment;
+        bgLayoutEntries[0].sampler.type = WGPUSamplerBindingType_Filtering;
+        bgLayoutEntries[1].binding = 1;
+        bgLayoutEntries[1].visibility = WGPUShaderStage_Fragment;
+        bgLayoutEntries[1].texture.sampleType = WGPUTextureSampleType_Float;
+        bgLayoutEntries[1].texture.viewDimension = WGPUTextureViewDimension_2D;
+
+        WGPUBindGroupLayoutDescriptor bgLayoutDesc = {};
+        bgLayoutDesc.entryCount = 2;
+        bgLayoutDesc.entries = bgLayoutEntries;
+        WGPUBindGroupLayout bgLayout = wgpuDeviceCreateBindGroupLayout(g_device, &bgLayoutDesc);
+
+        // Create pipeline layout
+        WGPUPipelineLayoutDescriptor pipelineLayoutDesc = {};
+        pipelineLayoutDesc.bindGroupLayoutCount = 1;
+        pipelineLayoutDesc.bindGroupLayouts = &bgLayout;
+        WGPUPipelineLayout pipelineLayout = wgpuDeviceCreatePipelineLayout(g_device, &pipelineLayoutDesc);
+
+        // Create pipeline
+        WGPURenderPipelineDescriptor pipelineDesc = {};
+        pipelineDesc.layout = pipelineLayout;
+        pipelineDesc.vertex.module = shaderModule;
+        WGPU_SET_ENTRY_POINT(pipelineDesc.vertex, "vs_main");
+
+        WGPUFragmentState fragmentState = {};
+        fragmentState.module = shaderModule;
+        WGPU_SET_ENTRY_POINT(fragmentState, "fs_main");
+        fragmentState.targetCount = 1;
+
+        WGPUColorTargetState colorTarget = {};
+        colorTarget.format = g_surfaceFormat;
+        colorTarget.writeMask = WGPUColorWriteMask_All;
+        fragmentState.targets = &colorTarget;
+
+        pipelineDesc.fragment = &fragmentState;
+        pipelineDesc.primitive.topology = WGPUPrimitiveTopology_TriangleList;
+        pipelineDesc.multisample.count = 1;
+        pipelineDesc.multisample.mask = 0xFFFFFFFF;
+
+        g_canvas2DPipeline = wgpuDeviceCreateRenderPipeline(g_device, &pipelineDesc);
+
+        wgpuShaderModuleRelease(shaderModule);
+        wgpuPipelineLayoutRelease(pipelineLayout);
+        wgpuBindGroupLayoutRelease(bgLayout);
+
+        if (!g_canvas2DPipeline) {
+            std::cerr << "[Canvas2D] Failed to create compositing pipeline" << std::endl;
+            return;
+        }
+    }
+
+    // Create bind group (recreate if texture changed)
+    if (!g_canvas2DBindGroup) {
+        if (!g_canvas2DSampler || !g_canvas2DTexture) {
+            return;
+        }
+
+        WGPUTextureViewDescriptor viewDesc = {};
+        viewDesc.format = WGPUTextureFormat_RGBA8Unorm;
+        viewDesc.dimension = WGPUTextureViewDimension_2D;
+        viewDesc.baseMipLevel = 0;
+        viewDesc.mipLevelCount = 1;
+        viewDesc.baseArrayLayer = 0;
+        viewDesc.arrayLayerCount = 1;
+        WGPUTextureView texView = wgpuTextureCreateView(g_canvas2DTexture, &viewDesc);
+
+        if (!texView) {
+            return;
+        }
+
+        WGPUBindGroupEntry bgEntries[2] = {};
+        bgEntries[0].binding = 0;
+        bgEntries[0].sampler = g_canvas2DSampler;
+        bgEntries[1].binding = 1;
+        bgEntries[1].textureView = texView;
+
+        WGPUBindGroupLayout layout = wgpuRenderPipelineGetBindGroupLayout(g_canvas2DPipeline, 0);
+        if (!layout) {
+            wgpuTextureViewRelease(texView);
+            return;
+        }
+
+        WGPUBindGroupDescriptor bgDesc = {};
+        bgDesc.layout = layout;
+        bgDesc.entryCount = 2;
+        bgDesc.entries = bgEntries;
+        g_canvas2DBindGroup = wgpuDeviceCreateBindGroup(g_device, &bgDesc);
+
+        wgpuBindGroupLayoutRelease(layout);
+        wgpuTextureViewRelease(texView);
+
+        if (!g_canvas2DBindGroup) {
+            return;
+        }
+    }
+
+    // Get surface texture
+    WGPUSurfaceTexture surfaceTexture;
+    wgpuSurfaceGetCurrentTexture(g_surface, &surfaceTexture);
+    if (!wgpuSurfaceTextureStatusIsSuccess(surfaceTexture.status)) {
+        return;
+    }
+
+    WGPUTextureViewDescriptor surfaceViewDesc = {};
+    surfaceViewDesc.format = g_surfaceFormat;
+    surfaceViewDesc.dimension = WGPUTextureViewDimension_2D;
+    surfaceViewDesc.baseMipLevel = 0;
+    surfaceViewDesc.mipLevelCount = 1;
+    surfaceViewDesc.baseArrayLayer = 0;
+    surfaceViewDesc.arrayLayerCount = 1;
+    WGPUTextureView surfaceView = wgpuTextureCreateView(surfaceTexture.texture, &surfaceViewDesc);
+
+    // Create command encoder and render pass
+    WGPUCommandEncoderDescriptor encDesc = {};
+    WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(g_device, &encDesc);
+
+    WGPURenderPassColorAttachment colorAttachment = {};
+    colorAttachment.view = surfaceView;
+    colorAttachment.loadOp = WGPULoadOp_Clear;
+    colorAttachment.storeOp = WGPUStoreOp_Store;
+    colorAttachment.clearValue = {0.0, 0.0, 0.0, 1.0};
+#if defined(MYSTRAL_WEBGPU_DAWN)
+    colorAttachment.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+#endif
+
+    WGPURenderPassDescriptor renderPassDesc = {};
+    renderPassDesc.colorAttachmentCount = 1;
+    renderPassDesc.colorAttachments = &colorAttachment;
+
+    WGPURenderPassEncoder renderPass = wgpuCommandEncoderBeginRenderPass(encoder, &renderPassDesc);
+    wgpuRenderPassEncoderSetPipeline(renderPass, g_canvas2DPipeline);
+    wgpuRenderPassEncoderSetBindGroup(renderPass, 0, g_canvas2DBindGroup, 0, nullptr);
+    wgpuRenderPassEncoderDraw(renderPass, 6, 1, 0, 0);
+    wgpuRenderPassEncoderEnd(renderPass);
+    wgpuRenderPassEncoderRelease(renderPass);
+
+    // Copy rendered texture to screenshot buffer
+    uint32_t bytesPerRow = ((g_canvasWidth * 4 + 255) / 256) * 256;  // Align to 256
+    size_t requiredSize = bytesPerRow * g_canvasHeight;
+
+    if (!g_screenshotBuffer || g_screenshotBufferSize < requiredSize) {
+        if (g_screenshotBuffer) {
+            wgpuBufferDestroy(g_screenshotBuffer);
+            wgpuBufferRelease(g_screenshotBuffer);
+        }
+
+        WGPUBufferDescriptor bufferDesc = {};
+        bufferDesc.size = requiredSize;
+        bufferDesc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead;
+        bufferDesc.mappedAtCreation = false;
+
+        g_screenshotBuffer = wgpuDeviceCreateBuffer(g_device, &bufferDesc);
+        g_screenshotBufferSize = requiredSize;
+        g_screenshotBytesPerRow = bytesPerRow;
+    }
+
+    // Copy surface texture to screenshot buffer
+    WGPUImageCopyTexture_Compat srcCopy = {};
+    srcCopy.texture = surfaceTexture.texture;
+    srcCopy.mipLevel = 0;
+    srcCopy.origin = {0, 0, 0};
+    srcCopy.aspect = WGPUTextureAspect_All;
+
+    WGPUImageCopyBuffer_Compat dstCopy = {};
+    dstCopy.buffer = g_screenshotBuffer;
+    dstCopy.layout.offset = 0;
+    dstCopy.layout.bytesPerRow = bytesPerRow;
+    dstCopy.layout.rowsPerImage = g_canvasHeight;
+
+    WGPUExtent3D copySize = {g_canvasWidth, g_canvasHeight, 1};
+    wgpuCommandEncoderCopyTextureToBuffer_Compat(encoder, &srcCopy, &dstCopy, &copySize);
+
+    WGPUCommandBufferDescriptor cmdDesc = {};
+    WGPUCommandBuffer cmdBuffer = wgpuCommandEncoderFinish(encoder, &cmdDesc);
+    wgpuQueueSubmit(g_queue, 1, &cmdBuffer);
+
+    wgpuCommandBufferRelease(cmdBuffer);
+    wgpuCommandEncoderRelease(encoder);
+    wgpuTextureViewRelease(surfaceView);
+
+    // Present
+    wgpuSurfacePresent(g_surface);
+
+    // Track for screenshot
+    g_currentTexture = surfaceTexture.texture;
+    g_screenshotReady = true;
+}
+
 void endDawnFrame() {
+    // Composite Canvas 2D content to WebGPU if the main canvas uses 2D context
+    compositeCanvas2DToWebGPU();
+
     // Tick the WebGPU device to process completed GPU work and free internal
     // resources (staging buffers, command encoder state, etc.). Without this,
     // internal objects accumulate unboundedly since completion callbacks never fire.
