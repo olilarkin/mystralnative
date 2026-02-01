@@ -140,6 +140,22 @@ public:
     virtual void* getWGPUDevice() = 0;
 
     /**
+     * Get the WebGPU queue (WGPUQueue)
+     */
+    virtual void* getWGPUQueue() = 0;
+
+    /**
+     * Get the WebGPU instance (WGPUInstance)
+     */
+    virtual void* getWGPUInstance() = 0;
+
+    /**
+     * Get the current render texture (WGPUTexture)
+     * For async video capture - returns the texture being rendered to
+     */
+    virtual void* getCurrentTexture() = 0;
+
+    /**
      * Get the SDL window (SDL_Window*)
      */
     virtual void* getSDLWindow() = 0;

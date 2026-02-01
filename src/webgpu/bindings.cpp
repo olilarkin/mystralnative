@@ -4687,6 +4687,16 @@ uint32_t getCurrentTextureHeight() {
     return g_canvasHeight;
 }
 
+void* getCurrentSurfaceTexture() {
+#if defined(MYSTRAL_WEBGPU_WGPU) || defined(MYSTRAL_WEBGPU_DAWN)
+    // Return the texture that the current view was created from (for screenshots)
+    // or the current texture if no view was created yet
+    return g_currentViewSourceTexture ? g_currentViewSourceTexture : g_currentTexture;
+#else
+    return nullptr;
+#endif
+}
+
 // Screenshot buffer access
 void* getScreenshotBuffer() {
 #if defined(MYSTRAL_WEBGPU_WGPU) || defined(MYSTRAL_WEBGPU_DAWN)

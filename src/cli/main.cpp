@@ -15,6 +15,7 @@
 #include "mystral/js/module_resolver.h"
 #include "mystral/js/ts_transpiler.h"
 #include "mystral/debug/debug_server.h"
+#include "mystral/video/async_capture.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -1428,8 +1429,36 @@ int runScript(const CLIOptions& opts) {
         }
 
         if (!opts.quiet) {
-            std::cout << "[Video] Recording " << (opts.endFrame - opts.startFrame) << " frames..." << std::endl;
+            std::cout << "[Video] Recording " << (opts.endFrame - opts.startFrame + 1) << " frames..." << std::endl;
         }
+
+        // Frame queue for async encoding
+        std::queue<std::vector<uint8_t>> frameQueue;
+        std::mutex queueMutex;
+        std::atomic<bool> encodingDone{false};
+        std::atomic<int> encodedFrames{0};
+        const int maxQueuedFrames = 30;
+
+        // Start encoder thread
+        std::thread encoderThread([&]() {
+            while (!encodingDone || !frameQueue.empty()) {
+                std::vector<uint8_t> frameData;
+                {
+                    std::lock_guard<std::mutex> lock(queueMutex);
+                    if (frameQueue.empty()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        continue;
+                    }
+                    frameData = std::move(frameQueue.front());
+                    frameQueue.pop();
+                }
+
+                if (!frameData.empty()) {
+                    recorder.addFrame(frameData.data());
+                    encodedFrames++;
+                }
+            }
+        });
 
         auto startTime = std::chrono::high_resolution_clock::now();
         int capturedFrames = 0;
@@ -1448,21 +1477,41 @@ int runScript(const CLIOptions& opts) {
                 uint32_t frameWidth, frameHeight;
 
                 if (runtime->captureFrame(frameData, frameWidth, frameHeight)) {
-                    if (recorder.addFrame(frameData.data())) {
+                    // Queue frame for async encoding
+                    bool queued = false;
+                    {
+                        std::lock_guard<std::mutex> lock(queueMutex);
+
+                        // Backpressure: if queue is full, drop THIS frame (not oldest)
+                        if (frameQueue.size() < static_cast<size_t>(maxQueuedFrames)) {
+                            frameQueue.push(std::move(frameData));
+                            queued = true;
+                        }
+                    }
+
+                    if (queued) {
                         capturedFrames++;
                         if (!opts.quiet && capturedFrames % 60 == 0) {
-                            std::cout << "[Video] Captured frame " << capturedFrames << "/" << (opts.endFrame - opts.startFrame + 1) << std::endl;
+                            std::cout << "[Video] Captured frame " << capturedFrames << "/" << (opts.endFrame - opts.startFrame + 1)
+                                      << " (queue: " << frameQueue.size() << ", encoded: " << encodedFrames.load() << ")" << std::endl;
                         }
+                    } else if (!opts.quiet && frame % 60 == 0) {
+                        std::cerr << "[Video] Skipped frame " << frame << " (encoder backpressure)" << std::endl;
                     }
                 }
             }
-
-            // Small delay to let GPU work complete
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
+
+        // Signal encoder to finish and wait
+        encodingDone = true;
+        encoderThread.join();
 
         auto endTime = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+
+        // Close the window before converting to MP4
+        runtime.reset();
+        SDL_PumpEvents();
 
         // Save the video
         bool success = recorder.save(webpPath);
@@ -1481,8 +1530,6 @@ int runScript(const CLIOptions& opts) {
                     }
                 }
             }
-        } else {
-            std::cerr << "Error: Failed to save video!" << std::endl;
         }
 
         std::cout.flush();

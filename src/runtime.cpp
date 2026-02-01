@@ -72,6 +72,11 @@
 #include <cstdlib>
 #include <cstring>
 
+// External functions from bindings.cpp for async video capture
+namespace mystral { namespace webgpu {
+    extern void* getCurrentSurfaceTexture();
+}}
+
 // Platform-specific includes for crash handler
 #ifdef _WIN32
 #include <io.h>
@@ -832,6 +837,20 @@ public:
 
     void* getWGPUDevice() override {
         return webgpu_ ? webgpu_->getDevice() : nullptr;
+    }
+
+    void* getWGPUQueue() override {
+        return webgpu_ ? webgpu_->getQueue() : nullptr;
+    }
+
+    void* getWGPUInstance() override {
+        return webgpu_ ? webgpu_->getInstance() : nullptr;
+    }
+
+    void* getCurrentTexture() override {
+        // Return the current surface texture for async capture
+        // This is set during getCurrentTextureView() in bindings
+        return webgpu::getCurrentSurfaceTexture();
     }
 
     void* getSDLWindow() override {

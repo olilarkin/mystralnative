@@ -912,6 +912,7 @@ set(MYSTRAL_SOURCES
     src/vfs/embedded_bundle.cpp
     src/async/event_loop.cpp
     src/debug/debug_server.cpp
+    src/video/async_capture.cpp
 )
 
 # Ray tracing sources (conditional)
