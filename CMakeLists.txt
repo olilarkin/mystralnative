@@ -934,6 +934,15 @@ if(MYSTRAL_USE_RAYTRACING)
             src/raytracing/metal_rt.mm
         )
     endif()
+
+    # Add DXR backend on Windows
+    if(WIN32)
+        list(APPEND MYSTRAL_SOURCES
+            src/raytracing/dxr_rt.cpp
+        )
+        add_compile_definitions(MYSTRAL_HAS_DXR)
+        message(STATUS "DXR ray tracing backend enabled")
+    endif()
 endif()
 
 if(ANDROID)
@@ -1207,6 +1216,13 @@ endif()
 if(MYSTRAL_USE_RAYTRACING AND Vulkan_FOUND)
     target_include_directories(mystral-runtime PRIVATE ${Vulkan_INCLUDE_DIR})
     target_link_libraries(mystral-runtime PRIVATE ${Vulkan_LIBRARY})
+endif()
+
+# DXR linkage (for DXR RT backend on Windows)
+if(MYSTRAL_USE_RAYTRACING AND WIN32)
+    # DXR requires D3D12 (already linked above) and dxcompiler for runtime shader compilation
+    # dxcompiler.dll ships with Windows 10 1903+ and is in the DirectX SDK
+    target_link_libraries(mystral-runtime PRIVATE dxcompiler.lib)
 endif()
 
 # ============================================================================

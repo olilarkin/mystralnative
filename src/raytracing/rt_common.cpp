@@ -4,15 +4,27 @@
  * Provides the factory function to create the appropriate RT backend
  * based on platform capabilities.
  *
- * Backend selection order:
- * 1. Vulkan RT (Linux, Windows with Vulkan SDK, macOS with MoltenVK)
- * 2. DXR (Windows with DirectX 12 - TODO)
- * 3. Metal RT (Apple Silicon with macOS 13+/Metal 3)
- * 4. Stub (fallback when no hardware RT available)
+ * Backend selection order (Windows):
+ * 1. DXR (DirectX 12 with ray tracing support)
+ * 2. Vulkan RT (fallback if DXR not available)
+ * 3. Stub (fallback when no hardware RT available)
+ *
+ * Backend selection order (macOS):
+ * 1. Metal RT (Apple Silicon with macOS 13+/Metal 3)
+ * 2. Vulkan RT (MoltenVK fallback)
+ * 3. Stub (fallback when no hardware RT available)
+ *
+ * Backend selection order (Linux):
+ * 1. Vulkan RT
+ * 2. Stub (fallback when no hardware RT available)
  */
 
 #include "rt_common.h"
 #include <iostream>
+
+#ifdef MYSTRAL_HAS_DXR
+#include "dxr_rt.h"
+#endif
 
 #ifdef MYSTRAL_HAS_VULKAN_RT
 #include "vulkan_rt.h"
@@ -112,6 +124,18 @@ public:
 std::unique_ptr<IRTBackend> createRTBackend() {
     // Try platform-specific backends in order of preference
 
+#ifdef MYSTRAL_HAS_DXR
+    // Try DXR backend first on Windows (native D3D12 ray tracing)
+    {
+        auto dxr = std::make_unique<DXRBackend>();
+        if (dxr->initialize()) {
+            std::cout << "[MystralRT] Using DXR backend" << std::endl;
+            return dxr;
+        }
+        std::cout << "[MystralRT] DXR initialization failed, trying Vulkan RT..." << std::endl;
+    }
+#endif
+
 #ifdef MYSTRAL_HAS_VULKAN_RT
     // Try Vulkan RT backend (cross-platform)
     {
@@ -123,14 +147,6 @@ std::unique_ptr<IRTBackend> createRTBackend() {
         std::cout << "[MystralRT] Vulkan RT initialization failed, trying fallback..." << std::endl;
     }
 #endif
-
-    // TODO: Add DXR backend for Windows
-    // #ifdef MYSTRAL_HAS_DXR
-    //     auto dxr = std::make_unique<DXRRTBackend>();
-    //     if (dxr->initialize()) {
-    //         return dxr;
-    //     }
-    // #endif
 
 #ifdef MYSTRAL_HAS_METAL_RT
     // Try Metal RT backend (Apple Silicon with macOS 13+)
