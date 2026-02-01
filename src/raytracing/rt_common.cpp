@@ -1,13 +1,22 @@
 /**
- * MystralNative Ray Tracing Stub Implementation
+ * MystralNative Ray Tracing Backend Factory
  *
- * Provides a stub backend that returns isSupported() = false.
- * Platform-specific implementations (DXR, Vulkan RT, Metal RT) will
- * be added in future tasks.
+ * Provides the factory function to create the appropriate RT backend
+ * based on platform capabilities.
+ *
+ * Backend selection order:
+ * 1. Vulkan RT (Linux, Windows with Vulkan SDK, macOS with MoltenVK)
+ * 2. DXR (Windows with DirectX 12 - TODO)
+ * 3. Metal RT (Apple Silicon with Metal 3 - TODO)
+ * 4. Stub (fallback when no hardware RT available)
  */
 
 #include "rt_common.h"
 #include <iostream>
+
+#ifdef MYSTRAL_HAS_VULKAN_RT
+#include "vulkan_rt.h"
+#endif
 
 namespace mystral {
 namespace rt {
@@ -97,12 +106,38 @@ public:
 // ============================================================================
 
 std::unique_ptr<IRTBackend> createRTBackend() {
-    // TODO: In Wave 3-4, detect platform and return appropriate backend:
-    // - Windows with DXR-capable GPU: DXRRTBackend
-    // - Vulkan with VK_KHR_ray_tracing_pipeline: VulkanRTBackend
-    // - Apple Silicon with Metal 3: MetalRTBackend
-    //
-    // For now, return stub backend
+    // Try platform-specific backends in order of preference
+
+#ifdef MYSTRAL_HAS_VULKAN_RT
+    // Try Vulkan RT backend (cross-platform)
+    {
+        auto vulkan = std::make_unique<VulkanRTBackend>();
+        if (vulkan->initialize()) {
+            std::cout << "[MystralRT] Using Vulkan RT backend" << std::endl;
+            return vulkan;
+        }
+        std::cout << "[MystralRT] Vulkan RT initialization failed, trying fallback..." << std::endl;
+    }
+#endif
+
+    // TODO: Add DXR backend for Windows
+    // #ifdef MYSTRAL_HAS_DXR
+    //     auto dxr = std::make_unique<DXRRTBackend>();
+    //     if (dxr->initialize()) {
+    //         return dxr;
+    //     }
+    // #endif
+
+    // TODO: Add Metal RT backend for Apple Silicon
+    // #ifdef MYSTRAL_HAS_METAL_RT
+    //     auto metal = std::make_unique<MetalRTBackend>();
+    //     if (metal->initialize()) {
+    //         return metal;
+    //     }
+    // #endif
+
+    // Fallback to stub backend
+    std::cout << "[MystralRT] No hardware RT available, using stub backend" << std::endl;
     return std::make_unique<StubRTBackend>();
 }
 

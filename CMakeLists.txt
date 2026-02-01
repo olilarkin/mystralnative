@@ -835,7 +835,41 @@ endif()
 if(MYSTRAL_USE_RAYTRACING)
     add_compile_definitions(MYSTRAL_HAS_RAYTRACING)
     message(STATUS "Ray tracing support enabled")
-    # TODO: In Wave 3, add glslang and SPIRV-Cross dependencies here for shader compilation
+
+    # Find Vulkan for Vulkan RT backend
+    if(NOT WIN32 OR MYSTRAL_USE_VULKAN_RT)
+        find_package(Vulkan QUIET)
+        if(Vulkan_FOUND)
+            add_compile_definitions(MYSTRAL_HAS_VULKAN_RT)
+            message(STATUS "Found Vulkan: ${Vulkan_LIBRARY}")
+            message(STATUS "Vulkan includes: ${Vulkan_INCLUDE_DIR}")
+        else()
+            # Try to find Vulkan SDK manually
+            if(DEFINED ENV{VULKAN_SDK})
+                set(VULKAN_SDK $ENV{VULKAN_SDK})
+                if(WIN32)
+                    set(Vulkan_LIBRARY "${VULKAN_SDK}/Lib/vulkan-1.lib")
+                else()
+                    set(Vulkan_LIBRARY "${VULKAN_SDK}/lib/libvulkan.so")
+                    if(NOT EXISTS ${Vulkan_LIBRARY})
+                        set(Vulkan_LIBRARY "${VULKAN_SDK}/lib/libvulkan.dylib")
+                    endif()
+                endif()
+                set(Vulkan_INCLUDE_DIR "${VULKAN_SDK}/include")
+
+                if(EXISTS ${Vulkan_LIBRARY} AND EXISTS ${Vulkan_INCLUDE_DIR})
+                    set(Vulkan_FOUND TRUE)
+                    add_compile_definitions(MYSTRAL_HAS_VULKAN_RT)
+                    message(STATUS "Found Vulkan SDK: ${VULKAN_SDK}")
+                endif()
+            endif()
+        endif()
+
+        if(NOT Vulkan_FOUND)
+            message(STATUS "Vulkan not found - Vulkan RT backend disabled")
+            message(STATUS "  Set VULKAN_SDK environment variable or install Vulkan SDK")
+        endif()
+    endif()
 endif()
 
 # ============================================================================
@@ -877,6 +911,13 @@ if(MYSTRAL_USE_RAYTRACING)
         src/raytracing/rt_common.cpp
         src/raytracing/bindings.cpp
     )
+
+    # Add Vulkan RT backend if Vulkan is available
+    if(Vulkan_FOUND)
+        list(APPEND MYSTRAL_SOURCES
+            src/raytracing/vulkan_rt.cpp
+        )
+    endif()
 endif()
 
 if(ANDROID)
@@ -1144,6 +1185,12 @@ endif()
 # Draco linkage (native mesh decoder - bypasses WASM/Worker)
 if(TARGET draco::draco)
     target_link_libraries(mystral-runtime PRIVATE draco::draco)
+endif()
+
+# Vulkan linkage (for Vulkan RT backend)
+if(MYSTRAL_USE_RAYTRACING AND Vulkan_FOUND)
+    target_include_directories(mystral-runtime PRIVATE ${Vulkan_INCLUDE_DIR})
+    target_link_libraries(mystral-runtime PRIVATE ${Vulkan_LIBRARY})
 endif()
 
 # ============================================================================

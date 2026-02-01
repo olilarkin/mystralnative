@@ -1,0 +1,70 @@
+/**
+ * Ray Generation Shader
+ *
+ * Generates primary rays from the camera through each pixel.
+ * Traces rays against the TLAS and stores results to the output image.
+ *
+ * Reference: VK_KHR_ray_tracing_pipeline specification
+ */
+
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+// Binding 0: Top-Level Acceleration Structure
+layout(binding = 0, set = 0) uniform accelerationStructureEXT tlas;
+
+// Binding 1: Output image (RGBA8)
+layout(binding = 1, set = 0, rgba8) uniform image2D outputImage;
+
+// Binding 2: Camera uniform buffer
+layout(binding = 2, set = 0) uniform CameraUBO {
+    mat4 viewInverse;   // Camera position and orientation
+    mat4 projInverse;   // Inverse projection matrix
+} cam;
+
+// Ray payload: color returned from hit/miss shaders
+layout(location = 0) rayPayloadEXT vec3 payload;
+
+void main() {
+    // Get normalized pixel coordinates [-1, 1]
+    vec2 pixelCenter = vec2(gl_LaunchIDEXT.xy) + vec2(0.5);
+    vec2 uv = pixelCenter / vec2(gl_LaunchSizeEXT.xy) * 2.0 - 1.0;
+
+    // Compute ray origin (camera position in world space)
+    vec4 origin = cam.viewInverse * vec4(0.0, 0.0, 0.0, 1.0);
+
+    // Compute ray direction using inverse projection and view matrices
+    // Map screen coordinates to clip space, then to world space
+    vec4 target = cam.projInverse * vec4(uv.x, -uv.y, 1.0, 1.0);
+    vec4 direction = cam.viewInverse * vec4(normalize(target.xyz / target.w), 0.0);
+
+    // Trace ray through the scene
+    // Parameters:
+    // - tlas: acceleration structure
+    // - gl_RayFlagsOpaqueEXT: treat all geometry as opaque
+    // - 0xFF: visibility mask (hit all geometry)
+    // - 0: SBT offset for hit group
+    // - 0: SBT stride
+    // - 0: miss shader index
+    // - origin.xyz: ray origin
+    // - 0.001: tmin (avoid self-intersection)
+    // - direction.xyz: ray direction
+    // - 10000.0: tmax (far plane)
+    // - 0: payload location
+    traceRayEXT(
+        tlas,
+        gl_RayFlagsOpaqueEXT,
+        0xFF,
+        0,      // sbtRecordOffset
+        0,      // sbtRecordStride
+        0,      // missIndex
+        origin.xyz,
+        0.001,  // tmin
+        direction.xyz,
+        10000.0, // tmax
+        0       // payload location
+    );
+
+    // Write result to output image
+    imageStore(outputImage, ivec2(gl_LaunchIDEXT.xy), vec4(payload, 1.0));
+}
