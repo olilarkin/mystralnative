@@ -123,6 +123,17 @@ public:
     bool submitCapture(WGPUTexture sourceTexture, uint32_t width, uint32_t height, int frameNumber);
 
     /**
+     * Submit a frame for capture and wait for completion (blocking)
+     * Use this when the source texture will be destroyed after this call returns.
+     * @param sourceTexture The rendered frame texture
+     * @param width Frame width
+     * @param height Frame height
+     * @param frameNumber Current frame number
+     * @return true if capture was successful
+     */
+    bool submitCaptureSync(WGPUTexture sourceTexture, uint32_t width, uint32_t height, int frameNumber);
+
+    /**
      * Process pending async operations (call once per frame)
      * This checks for completed buffer maps and moves data to the frame queue
      */

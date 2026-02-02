@@ -16,6 +16,7 @@
 #include "mystral/js/ts_transpiler.h"
 #include "mystral/debug/debug_server.h"
 #include "mystral/video/async_capture.h"
+#include "mystral/video/video_recorder.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -319,6 +320,9 @@ VIDEO RECORDING OPTIONS:
     --video-fps <n>       Video framerate (default: 60)
     --video-quality <n>   WebP quality 0-100 (default: 80, higher = better)
     --mp4                 Convert to MP4 via FFmpeg (auto-detected if --video ends in .mp4)
+    --native-capture      Use OS-level screen capture (default on macOS 12.3+/Windows 10 1803+)
+                          Directly encodes to H.264 MP4 with low CPU overhead
+    --gpu-capture         Force GPU readback capture (fallback mode, works everywhere)
 
 DEBUG/TESTING OPTIONS:
     --debug               Enable verbose debug logging (WebGPU, shaders, etc.)
@@ -422,6 +426,7 @@ struct CLIOptions {
     int videoFps = 60;          // Video framerate
     int videoQuality = 80;      // WebP quality (0-100, higher = better quality, larger file)
     bool convertToMp4 = false;  // Convert WebP to MP4 via FFmpeg
+    bool useNativeCapture = true;  // Use OS-level capture when available (macOS/Windows)
 
     // Compile options
     std::vector<std::string> assetDirs;
@@ -498,6 +503,10 @@ CLIOptions parseArgs(int argc, char* argv[]) {
             opts.videoQuality = std::stoi(argv[++i]);
         } else if (arg == "--mp4") {
             opts.convertToMp4 = true;
+        } else if (arg == "--native-capture") {
+            opts.useNativeCapture = true;
+        } else if (arg == "--gpu-capture" || arg == "--no-native-capture") {
+            opts.useNativeCapture = false;
         } else if (arg == "--debug-port" && i + 1 < argc) {
             opts.debugPort = std::stoi(argv[++i]);
         } else if (arg == "--debug") {
@@ -926,8 +935,9 @@ private:
 
 /**
  * Check if FFmpeg is available on the system
+ * Note: Not static - used by video recorders
  */
-static bool isFFmpegAvailable() {
+bool isFFmpegAvailable() {
 #ifdef _WIN32
     int result = system("where ffmpeg >nul 2>nul");
 #else
@@ -945,8 +955,9 @@ static bool isFFmpegAvailable() {
  * @param fps Video framerate
  * @param deleteWebp Whether to delete the WebP file after conversion
  * @return true on success
+ * Note: Not static - used by video recorders
  */
-static bool convertWebPToMP4(const std::string& webpPath, const std::string& mp4Path, int fps, bool deleteWebp, bool quiet) {
+bool convertWebPToMP4(const std::string& webpPath, const std::string& mp4Path, int fps, bool deleteWebp, bool quiet) {
     if (!isFFmpegAvailable()) {
         if (!quiet) {
             std::cerr << "[Video] FFmpeg not found. WebP file saved: " << webpPath << std::endl;
@@ -1380,11 +1391,13 @@ int runScript(const CLIOptions& opts) {
         _exit(success ? 0 : 1);
     } else if (videoMode) {
         // Video recording mode
-#ifdef MYSTRAL_HAS_WEBP_MUX
+        // Try native OS-level capture first (ScreenCaptureKit on macOS, Windows.Graphics.Capture on Windows)
+        // Falls back to GPU readback + WebP encoding if native capture is not available
+
         // Validate options
         if (opts.endFrame < 0) {
             std::cerr << "Error: --end-frame is required for video recording" << std::endl;
-            std::cerr << "Example: mystral run game.js --video output.webp --end-frame 300" << std::endl;
+            std::cerr << "Example: mystral run game.js --video output.mp4 --end-frame 300" << std::endl;
             return 1;
         }
 
@@ -1393,76 +1406,205 @@ int runScript(const CLIOptions& opts) {
             return 1;
         }
 
-        // Determine output paths
-        std::string webpPath = opts.videoPath;
-        std::string mp4Path;
-        bool needsConversion = opts.convertToMp4;
+        // Check if native capture is available and requested
+        bool useNative = opts.useNativeCapture && mystral::video::VideoRecorder::isNativeCaptureAvailable();
 
-        // If output ends with .mp4, convert the path to .webp for intermediate file
-        if (needsConversion) {
-            // Generate MP4 path from video path
-            mp4Path = opts.videoPath;
-            size_t dotPos = mp4Path.rfind('.');
-            if (dotPos != std::string::npos) {
-                mp4Path = mp4Path.substr(0, dotPos) + ".mp4";
-            } else {
-                mp4Path = mp4Path + ".mp4";
-            }
+        // Determine output path
+        std::string outputPath = opts.videoPath;
 
-            // Ensure webp path has .webp extension
-            dotPos = webpPath.rfind('.');
+        // Native capture outputs MP4 directly; GPU capture uses WebP
+        if (useNative) {
+            // Ensure output path ends with .mp4 for native capture
+            size_t dotPos = outputPath.rfind('.');
             if (dotPos != std::string::npos) {
-                std::string ext = webpPath.substr(dotPos);
-                if (ext != ".webp" && ext != ".WEBP") {
-                    webpPath = webpPath.substr(0, dotPos) + ".webp";
+                std::string ext = outputPath.substr(dotPos);
+                if (ext != ".mp4" && ext != ".MP4") {
+                    outputPath = outputPath.substr(0, dotPos) + ".mp4";
                 }
             } else {
-                webpPath = webpPath + ".webp";
+                outputPath += ".mp4";
             }
         }
 
-        // Create video recorder
-        WebPVideoRecorder recorder(opts.width, opts.height, opts.videoFps, opts.videoQuality);
-        if (!recorder.isValid()) {
-            std::cerr << "Error: Failed to create video recorder" << std::endl;
+        // Create video recorder (factory selects appropriate backend)
+        std::unique_ptr<mystral::video::VideoRecorder> recorder;
+        if (useNative) {
+            recorder = mystral::video::VideoRecorder::create(nullptr, nullptr, nullptr);
+        } else {
+            // GPU readback mode requires WebGPU handles
+            recorder = mystral::video::VideoRecorder::create(
+                static_cast<WGPUDevice>(runtime->getWGPUDevice()),
+                static_cast<WGPUQueue>(runtime->getWGPUQueue()),
+                static_cast<WGPUInstance>(runtime->getWGPUInstance())
+            );
+        }
+
+        if (!recorder) {
+#ifdef MYSTRAL_HAS_WEBP_MUX
+            // Fall back to legacy WebP recorder
+            if (!opts.quiet) {
+                std::cout << "[Video] Falling back to legacy WebP recorder..." << std::endl;
+            }
+
+            // Determine output paths for WebP fallback
+            std::string webpPath = opts.videoPath;
+            std::string mp4Path;
+            bool needsConversion = opts.convertToMp4;
+
+            // If output ends with .mp4, convert the path to .webp for intermediate file
+            if (needsConversion) {
+                mp4Path = opts.videoPath;
+                size_t dotPos = mp4Path.rfind('.');
+                if (dotPos != std::string::npos) {
+                    mp4Path = mp4Path.substr(0, dotPos) + ".mp4";
+                } else {
+                    mp4Path = mp4Path + ".mp4";
+                }
+
+                dotPos = webpPath.rfind('.');
+                if (dotPos != std::string::npos) {
+                    std::string ext = webpPath.substr(dotPos);
+                    if (ext != ".webp" && ext != ".WEBP") {
+                        webpPath = webpPath.substr(0, dotPos) + ".webp";
+                    }
+                } else {
+                    webpPath = webpPath + ".webp";
+                }
+            }
+
+            // Create legacy WebP recorder
+            WebPVideoRecorder legacyRecorder(opts.width, opts.height, opts.videoFps, opts.videoQuality);
+            if (!legacyRecorder.isValid()) {
+                std::cerr << "Error: Failed to create video recorder" << std::endl;
+                return 1;
+            }
+
+            if (!opts.quiet) {
+                std::cout << "[Video] Recording " << (opts.endFrame - opts.startFrame + 1) << " frames..." << std::endl;
+            }
+
+            // Frame queue for async encoding
+            std::queue<std::vector<uint8_t>> frameQueue;
+            std::mutex queueMutex;
+            std::atomic<bool> encodingDone{false};
+            std::atomic<int> encodedFrames{0};
+            const int maxQueuedFrames = 30;
+
+            // Start encoder thread
+            std::thread encoderThread([&]() {
+                while (!encodingDone || !frameQueue.empty()) {
+                    std::vector<uint8_t> frameData;
+                    {
+                        std::lock_guard<std::mutex> lock(queueMutex);
+                        if (frameQueue.empty()) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                            continue;
+                        }
+                        frameData = std::move(frameQueue.front());
+                        frameQueue.pop();
+                    }
+
+                    if (!frameData.empty()) {
+                        legacyRecorder.addFrame(frameData.data());
+                        encodedFrames++;
+                    }
+                }
+            });
+
+            auto startTime = std::chrono::high_resolution_clock::now();
+            int capturedFrames = 0;
+
+            for (int frame = 0; frame <= opts.endFrame; frame++) {
+                if (!runtime->pollEvents()) {
+                    if (!opts.quiet) {
+                        std::cerr << "[Video] Runtime quit early at frame " << frame << std::endl;
+                    }
+                    break;
+                }
+
+                if (frame >= opts.startFrame) {
+                    std::vector<uint8_t> frameData;
+                    uint32_t frameWidth, frameHeight;
+
+                    if (runtime->captureFrame(frameData, frameWidth, frameHeight)) {
+                        bool queued = false;
+                        {
+                            std::lock_guard<std::mutex> lock(queueMutex);
+                            if (frameQueue.size() < static_cast<size_t>(maxQueuedFrames)) {
+                                frameQueue.push(std::move(frameData));
+                                queued = true;
+                            }
+                        }
+
+                        if (queued) {
+                            capturedFrames++;
+                            if (!opts.quiet && capturedFrames % 60 == 0) {
+                                std::cout << "[Video] Captured frame " << capturedFrames << "/" << (opts.endFrame - opts.startFrame + 1)
+                                          << " (queue: " << frameQueue.size() << ", encoded: " << encodedFrames.load() << ")" << std::endl;
+                            }
+                        }
+                    }
+                }
+            }
+
+            encodingDone = true;
+            encoderThread.join();
+
+            auto endTime = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+
+            runtime.reset();
+            SDL_PumpEvents();
+
+            bool success = legacyRecorder.save(webpPath);
+
+            if (success) {
+                if (!opts.quiet) {
+                    std::cout << "[Video] Saved WebP: " << webpPath << std::endl;
+                    std::cout << "[Video] Recorded " << capturedFrames << " frames in " << duration.count() << "ms" << std::endl;
+                }
+
+                if (needsConversion) {
+                    if (convertWebPToMP4(webpPath, mp4Path, opts.videoFps, true, opts.quiet)) {
+                        if (!opts.quiet) {
+                            std::cout << "[Video] Converted to MP4: " << mp4Path << std::endl;
+                        }
+                    }
+                }
+            }
+
+            std::cout.flush();
+            std::cerr.flush();
+            _exit(success ? 0 : 1);
+#else
+            std::cerr << "Error: Video recording requires libwebpmux (build with MYSTRAL_HAS_WEBP_MUX)" << std::endl;
+            return 1;
+#endif
+        }
+
+        // Using new VideoRecorder API
+        if (!opts.quiet) {
+            std::cout << "[Video] Using " << recorder->getTypeName() << std::endl;
+            std::cout << "[Video] Recording " << (opts.endFrame - opts.startFrame + 1) << " frames to " << outputPath << std::endl;
+        }
+
+        // Configure recording
+        mystral::video::VideoRecorderConfig recConfig;
+        recConfig.fps = opts.videoFps;
+        recConfig.width = opts.width;
+        recConfig.height = opts.height;
+        recConfig.quality = opts.videoQuality;
+        recConfig.convertToMp4 = opts.convertToMp4;
+
+        // Start recording
+        if (!recorder->startRecording(runtime->getSDLWindow(), outputPath, recConfig)) {
+            std::cerr << "Error: Failed to start video recording" << std::endl;
             return 1;
         }
 
-        if (!opts.quiet) {
-            std::cout << "[Video] Recording " << (opts.endFrame - opts.startFrame + 1) << " frames..." << std::endl;
-        }
-
-        // Frame queue for async encoding
-        std::queue<std::vector<uint8_t>> frameQueue;
-        std::mutex queueMutex;
-        std::atomic<bool> encodingDone{false};
-        std::atomic<int> encodedFrames{0};
-        const int maxQueuedFrames = 30;
-
-        // Start encoder thread
-        std::thread encoderThread([&]() {
-            while (!encodingDone || !frameQueue.empty()) {
-                std::vector<uint8_t> frameData;
-                {
-                    std::lock_guard<std::mutex> lock(queueMutex);
-                    if (frameQueue.empty()) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                        continue;
-                    }
-                    frameData = std::move(frameQueue.front());
-                    frameQueue.pop();
-                }
-
-                if (!frameData.empty()) {
-                    recorder.addFrame(frameData.data());
-                    encodedFrames++;
-                }
-            }
-        });
-
         auto startTime = std::chrono::high_resolution_clock::now();
-        int capturedFrames = 0;
 
+        // Main recording loop
         for (int frame = 0; frame <= opts.endFrame; frame++) {
             if (!runtime->pollEvents()) {
                 if (!opts.quiet) {
@@ -1471,74 +1613,50 @@ int runScript(const CLIOptions& opts) {
                 break;
             }
 
-            // Capture frames in the specified range
+            // Capture frame (for GPU readback recorder; no-op for native capture)
             if (frame >= opts.startFrame) {
-                std::vector<uint8_t> frameData;
-                uint32_t frameWidth, frameHeight;
-
-                if (runtime->captureFrame(frameData, frameWidth, frameHeight)) {
-                    // Queue frame for async encoding
-                    bool queued = false;
-                    {
-                        std::lock_guard<std::mutex> lock(queueMutex);
-
-                        // Backpressure: if queue is full, drop THIS frame (not oldest)
-                        if (frameQueue.size() < static_cast<size_t>(maxQueuedFrames)) {
-                            frameQueue.push(std::move(frameData));
-                            queued = true;
-                        }
-                    }
-
-                    if (queued) {
-                        capturedFrames++;
-                        if (!opts.quiet && capturedFrames % 60 == 0) {
-                            std::cout << "[Video] Captured frame " << capturedFrames << "/" << (opts.endFrame - opts.startFrame + 1)
-                                      << " (queue: " << frameQueue.size() << ", encoded: " << encodedFrames.load() << ")" << std::endl;
-                        }
-                    } else if (!opts.quiet && frame % 60 == 0) {
-                        std::cerr << "[Video] Skipped frame " << frame << " (encoder backpressure)" << std::endl;
-                    }
+                void* texture = runtime->getCurrentTexture();
+                if (texture) {
+                    recorder->captureFrame(texture, opts.width, opts.height);
                 }
+            }
+
+            // Process any pending capture operations
+            recorder->processFrame();
+
+            // Progress reporting
+            if (!opts.quiet && frame >= opts.startFrame && (frame - opts.startFrame) % 60 == 0) {
+                auto stats = recorder->getStats();
+                std::cout << "[Video] Frame " << (frame - opts.startFrame) << "/" << (opts.endFrame - opts.startFrame + 1)
+                          << " (captured: " << stats.capturedFrames << ", dropped: " << stats.droppedFrames << ")" << std::endl;
             }
         }
 
-        // Signal encoder to finish and wait
-        encodingDone = true;
-        encoderThread.join();
+        // Stop recording
+        bool success = recorder->stopRecording();
 
         auto endTime = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
 
-        // Close the window before converting to MP4
-        runtime.reset();
-        SDL_PumpEvents();
-
-        // Save the video
-        bool success = recorder.save(webpPath);
-
         if (success) {
+            auto stats = recorder->getStats();
             if (!opts.quiet) {
-                std::cout << "[Video] Saved WebP: " << webpPath << std::endl;
-                std::cout << "[Video] Recorded " << capturedFrames << " frames in " << duration.count() << "ms" << std::endl;
-            }
-
-            // Convert to MP4 if requested
-            if (needsConversion) {
-                if (convertWebPToMP4(webpPath, mp4Path, opts.videoFps, true, opts.quiet)) {
-                    if (!opts.quiet) {
-                        std::cout << "[Video] Converted to MP4: " << mp4Path << std::endl;
-                    }
+                std::cout << "[Video] Recording complete: " << outputPath << std::endl;
+                std::cout << "[Video] Captured " << stats.capturedFrames << " frames in " << duration.count() << "ms" << std::endl;
+                if (stats.droppedFrames > 0) {
+                    std::cout << "[Video] Dropped " << stats.droppedFrames << " frames" << std::endl;
                 }
             }
         }
 
+        // Cleanup
+        recorder.reset();
+        runtime.reset();
+        SDL_PumpEvents();
+
         std::cout.flush();
         std::cerr.flush();
         _exit(success ? 0 : 1);
-#else
-        std::cerr << "Error: Video recording requires libwebpmux (build with MYSTRAL_HAS_WEBP_MUX)" << std::endl;
-        return 1;
-#endif
     } else {
         // Normal mode: run main loop until quit
         // If debug server is enabled, we need to use a manual loop

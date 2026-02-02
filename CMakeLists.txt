@@ -913,6 +913,8 @@ set(MYSTRAL_SOURCES
     src/async/event_loop.cpp
     src/debug/debug_server.cpp
     src/video/async_capture.cpp
+    src/video/video_recorder.cpp
+    src/video/gpu_readback_recorder.cpp
 )
 
 # Ray tracing sources (conditional)
@@ -988,14 +990,32 @@ target_compile_definitions(mystral-runtime PUBLIC
 if(APPLE)
     target_sources(mystral-runtime PRIVATE
         src/platform/surface_metal.mm
+        src/video/screen_capture_kit.mm
     )
     if(MYSTRAL_USE_JSC)
         target_sources(mystral-runtime PRIVATE src/js/jsc_engine.mm)
         target_link_libraries(mystral-runtime PRIVATE ${JAVASCRIPTCORE_FRAMEWORK})
     endif()
+    # ScreenCaptureKit for video recording (macOS 12.3+)
+    # Note: Framework is weakly linked for backward compatibility with older macOS
+    if(NOT MYSTRAL_PLATFORM STREQUAL "ios")
+        target_link_libraries(mystral-runtime PRIVATE
+            "-weak_framework ScreenCaptureKit"
+            "-framework AVFoundation"
+            "-framework CoreMedia"
+            "-framework CoreVideo"
+        )
+    endif()
 elseif(WIN32)
     target_sources(mystral-runtime PRIVATE
         src/platform/surface_win32.cpp
+        src/video/windows_graphics_capture.cpp
+    )
+    # Windows.Graphics.Capture and Media Foundation for video recording
+    target_link_libraries(mystral-runtime PRIVATE
+        mfplat.lib
+        mfuuid.lib
+        mfreadwrite.lib
     )
 elseif(ANDROID)
     target_sources(mystral-runtime PRIVATE

@@ -33,8 +33,12 @@ static void onBufferMapped(WGPUBufferMapAsyncStatus_Compat status, void* userdat
 #if WGPU_BUFFER_MAP_USES_CALLBACK_INFO
 static void onBufferMappedInfo(WGPUMapAsyncStatus status, WGPUStringView message, void* userdata1, void* userdata2) {
     auto* buffer = static_cast<ReadbackBuffer*>(userdata1);
-    buffer->mapStatus = (status == WGPUMapAsyncStatus_Success) ? 0 : 1;
+    buffer->mapStatus = (status == WGPUMapAsyncStatus_Success) ? 0 : static_cast<int>(status);
     buffer->mapComplete.store(true, std::memory_order_release);
+    if (buffer->frameNumber == 0) {
+        std::cout << "[AsyncCapture] Buffer map callback for frame " << buffer->frameNumber
+                  << ": status=" << static_cast<int>(status) << std::endl;
+    }
 }
 #endif
 
@@ -145,7 +149,12 @@ void AsyncCapture::releaseBuffer(ReadbackBuffer* buffer) {
 
 bool AsyncCapture::submitCapture(WGPUTexture sourceTexture, uint32_t width, uint32_t height, int frameNumber) {
     if (!initialized_ || !sourceTexture) {
+        std::cerr << "[AsyncCapture] submitCapture failed: initialized=" << initialized_ << ", texture=" << (void*)sourceTexture << std::endl;
         return false;
+    }
+
+    if (frameNumber == 0) {
+        std::cout << "[AsyncCapture] First frame: " << width << "x" << height << ", texture=" << (void*)sourceTexture << std::endl;
     }
 
     // Acquire a buffer
@@ -215,6 +224,164 @@ bool AsyncCapture::submitCapture(WGPUTexture sourceTexture, uint32_t width, uint
     return true;
 }
 
+bool AsyncCapture::submitCaptureSync(WGPUTexture sourceTexture, uint32_t width, uint32_t height, int frameNumber) {
+    if (!initialized_ || !sourceTexture) {
+        return false;
+    }
+
+    // For sync capture, create a fresh buffer each time to avoid mapping state issues
+    // WebGPU buffer unmapping can be async, so reusing buffers immediately causes errors
+    ReadbackBuffer tempBuffer;
+    if (!createBuffer(tempBuffer, width, height)) {
+        droppedFrames_++;
+        return false;
+    }
+    ReadbackBuffer* buffer = &tempBuffer;
+
+    // Create command encoder for the copy
+    WGPUCommandEncoderDescriptor encDesc = {};
+    WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device_, &encDesc);
+    if (!encoder) {
+        return false;
+    }
+
+    // Copy texture to buffer
+    WGPUImageCopyTexture_Compat srcCopy = {};
+    srcCopy.texture = sourceTexture;
+    srcCopy.mipLevel = 0;
+    srcCopy.origin = {0, 0, 0};
+    srcCopy.aspect = WGPUTextureAspect_All;
+
+    WGPUImageCopyBuffer_Compat dstCopy = {};
+    dstCopy.buffer = buffer->buffer;
+    dstCopy.layout.offset = 0;
+    dstCopy.layout.bytesPerRow = buffer->bytesPerRow;
+    dstCopy.layout.rowsPerImage = height;
+
+    WGPUExtent3D copySize = {width, height, 1};
+    wgpuCommandEncoderCopyTextureToBuffer(encoder, &srcCopy, &dstCopy, &copySize);
+
+    // Submit the copy command
+    WGPUCommandBufferDescriptor cmdDesc = {};
+    WGPUCommandBuffer cmdBuffer = wgpuCommandEncoderFinish(encoder, &cmdDesc);
+    wgpuQueueSubmit(queue_, 1, &cmdBuffer);
+    wgpuCommandBufferRelease(cmdBuffer);
+    wgpuCommandEncoderRelease(encoder);
+
+    // Synchronously wait for the copy to complete by mapping the buffer synchronously
+    buffer->frameNumber = frameNumber;
+    buffer->mapComplete.store(false, std::memory_order_release);
+    buffer->state = BufferState::MapPending;
+
+#if WGPU_BUFFER_MAP_USES_CALLBACK_INFO
+    WGPUBufferMapCallbackInfo mapCallbackInfo = {};
+    mapCallbackInfo.mode = WGPUCallbackMode_AllowProcessEvents;
+    mapCallbackInfo.callback = onBufferMappedInfo;
+    mapCallbackInfo.userdata1 = buffer;
+    mapCallbackInfo.userdata2 = nullptr;
+    wgpuBufferMapAsync(buffer->buffer, WGPUMapMode_Read, 0, buffer->size, mapCallbackInfo);
+#else
+    wgpuBufferMapAsync(buffer->buffer, WGPUMapMode_Read, 0, buffer->size, onBufferMapped, buffer);
+#endif
+
+    // Wait for the map to complete (synchronous wait)
+    int maxIterations = 1000;  // Prevent infinite loop
+    while (!buffer->mapComplete.load(std::memory_order_acquire) && maxIterations > 0) {
+#if defined(MYSTRAL_WEBGPU_DAWN)
+        wgpuDeviceTick(device_);
+#elif defined(MYSTRAL_WEBGPU_WGPU)
+        wgpuDevicePoll(device_, false, nullptr);
+#endif
+        if (instance_) {
+            wgpuInstanceProcessEvents(instance_);
+        }
+        maxIterations--;
+    }
+
+    if (maxIterations == 0) {
+        std::cerr << "[AsyncCapture] Sync capture timeout waiting for buffer map" << std::endl;
+        wgpuBufferDestroy(buffer->buffer);
+        wgpuBufferRelease(buffer->buffer);
+        droppedFrames_++;
+        return false;
+    }
+
+    // Check map status (Dawn uses 1 for Success)
+#if WGPU_BUFFER_MAP_USES_CALLBACK_INFO
+    if (buffer->mapStatus != 1) {  // WGPUMapAsyncStatus_Success = 1
+#else
+    if (buffer->mapStatus != 0) {  // WGPUBufferMapAsyncStatus_Success = 0
+#endif
+        std::cerr << "[AsyncCapture] Sync capture map failed with status " << buffer->mapStatus << std::endl;
+        wgpuBufferDestroy(buffer->buffer);
+        wgpuBufferRelease(buffer->buffer);
+        droppedFrames_++;
+        return false;
+    }
+
+    // Read data and queue the frame
+    buffer->state = BufferState::Mapped;
+
+    // Get mapped data
+    const void* mappedData = wgpuBufferGetConstMappedRange(buffer->buffer, 0, buffer->size);
+    if (!mappedData) {
+        std::cerr << "[AsyncCapture] Sync capture failed to get mapped range" << std::endl;
+        wgpuBufferUnmap(buffer->buffer);
+        wgpuBufferDestroy(buffer->buffer);
+        wgpuBufferRelease(buffer->buffer);
+        droppedFrames_++;
+        return false;
+    }
+
+    if (frameNumber == 0) {
+        std::cout << "[AsyncCapture] Sync capture frame 0: mappedData=" << mappedData << std::endl;
+        // Check pixel data
+        const uint8_t* src = static_cast<const uint8_t*>(mappedData);
+        int nonZeroCount = 0;
+        for (size_t i = 0; i < std::min(buffer->size, (size_t)10000); i++) {
+            if (src[i] != 0) nonZeroCount++;
+        }
+        std::cout << "[AsyncCapture] First 10000 bytes: " << nonZeroCount << " non-zero" << std::endl;
+    }
+
+    // Copy data to frame queue (BGRA -> RGBA conversion)
+    {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+
+        CapturedFrame frame;
+        frame.width = buffer->width;
+        frame.height = buffer->height;
+        frame.frameNumber = frameNumber;
+        frame.timestamp = frameNumber / 60.0;
+        frame.pixels.resize(buffer->width * buffer->height * 4);
+
+        const uint8_t* src = static_cast<const uint8_t*>(mappedData);
+        uint8_t* dst = frame.pixels.data();
+
+        for (uint32_t y = 0; y < buffer->height; y++) {
+            const uint8_t* srcRow = src + y * buffer->bytesPerRow;
+            uint8_t* dstRow = dst + y * buffer->width * 4;
+            for (uint32_t x = 0; x < buffer->width; x++) {
+                // BGRA -> RGBA
+                dstRow[x * 4 + 0] = srcRow[x * 4 + 2];  // R <- B
+                dstRow[x * 4 + 1] = srcRow[x * 4 + 1];  // G
+                dstRow[x * 4 + 2] = srcRow[x * 4 + 0];  // B <- R
+                dstRow[x * 4 + 3] = srcRow[x * 4 + 3];  // A
+            }
+        }
+
+        frameQueue_.push(std::move(frame));
+    }
+
+    // Cleanup temp buffer
+    wgpuBufferUnmap(buffer->buffer);
+    wgpuBufferDestroy(buffer->buffer);
+    wgpuBufferRelease(buffer->buffer);
+    capturedFrames_++;
+
+    return true;
+}
+
 void AsyncCapture::processBuffer(ReadbackBuffer& buffer) {
     if (buffer.state != BufferState::MapPending) {
         return;
@@ -225,8 +392,12 @@ void AsyncCapture::processBuffer(ReadbackBuffer& buffer) {
         return;
     }
 
-    // Map completed - check status
-    if (buffer.mapStatus != 0) {
+    // Map completed - check status (Dawn uses 1 for Success, wgpu-native uses 0)
+#if WGPU_BUFFER_MAP_USES_CALLBACK_INFO
+    if (buffer.mapStatus != 1) {  // WGPUMapAsyncStatus_Success = 1
+#else
+    if (buffer.mapStatus != 0) {  // WGPUBufferMapAsyncStatus_Success = 0
+#endif
         std::cerr << "[AsyncCapture] Buffer map failed with status " << buffer.mapStatus << std::endl;
         releaseBuffer(&buffer);
         droppedFrames_++;
@@ -245,11 +416,15 @@ void AsyncCapture::copyToFrameQueue(ReadbackBuffer* buffer) {
     // Get mapped data
     const void* mappedData = wgpuBufferGetConstMappedRange(buffer->buffer, 0, buffer->size);
     if (!mappedData) {
-        std::cerr << "[AsyncCapture] Failed to get mapped range" << std::endl;
+        std::cerr << "[AsyncCapture] Failed to get mapped range for frame " << buffer->frameNumber << std::endl;
         wgpuBufferUnmap(buffer->buffer);
         releaseBuffer(buffer);
         droppedFrames_++;
         return;
+    }
+
+    if (buffer->frameNumber == 0) {
+        std::cout << "[AsyncCapture] mappedData=" << mappedData << ", size=" << buffer->size << std::endl;
     }
 
     // Check queue capacity with backpressure
@@ -270,6 +445,20 @@ void AsyncCapture::copyToFrameQueue(ReadbackBuffer* buffer) {
         frame.frameNumber = buffer->frameNumber;
         frame.timestamp = buffer->frameNumber / 60.0;  // Assuming 60 FPS
         frame.pixels.resize(buffer->width * buffer->height * 4);
+
+        if (buffer->frameNumber == 0) {
+            std::cout << "[AsyncCapture] copyToFrameQueue: frame " << buffer->frameNumber
+                      << " with " << buffer->width << "x" << buffer->height
+                      << " (bytesPerRow=" << buffer->bytesPerRow << ", size=" << buffer->size << ")" << std::endl;
+
+            // Check if pixel data is valid (not all zeros)
+            const uint8_t* src = static_cast<const uint8_t*>(mappedData);
+            int nonZeroCount = 0;
+            for (size_t i = 0; i < std::min(buffer->size, (size_t)10000); i++) {
+                if (src[i] != 0) nonZeroCount++;
+            }
+            std::cout << "[AsyncCapture] First 10000 bytes: " << nonZeroCount << " non-zero" << std::endl;
+        }
 
         const uint8_t* src = static_cast<const uint8_t*>(mappedData);
         uint8_t* dst = frame.pixels.data();
