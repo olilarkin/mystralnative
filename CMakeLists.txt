@@ -1010,11 +1010,18 @@ elseif(WIN32)
     target_sources(mystral-runtime PRIVATE
         src/platform/surface_win32.cpp
         src/video/windows_graphics_capture.cpp
+        src/video/windows_graphics_capture_impl.cpp
     )
-    # NOTE: Windows.Graphics.Capture is currently stubbed out due to C++/WinRT
-    # namespace conflicts. GPU readback fallback is used on Windows.
-    # TODO: Re-enable these when native Windows capture is fixed:
-    # target_link_libraries(mystral-runtime PRIVATE mfplat.lib mfuuid.lib mfreadwrite.lib)
+    # Windows.Graphics.Capture uses C++/WinRT and Media Foundation
+    # The impl file is isolated from Windows.h to avoid namespace conflicts
+    target_link_libraries(mystral-runtime PRIVATE
+        d3d11.lib
+        dxgi.lib
+        mfplat.lib
+        mfuuid.lib
+        mfreadwrite.lib
+        windowsapp.lib
+    )
 elseif(ANDROID)
     target_sources(mystral-runtime PRIVATE
         src/platform/surface_android.cpp
