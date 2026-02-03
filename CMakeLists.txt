@@ -1033,12 +1033,14 @@ elseif(WIN32)
     )
     # Windows.Graphics.Capture uses C++/WinRT with namespace aliases to avoid
     # conflicts with Windows SDK interop headers, plus Media Foundation for H.264
+    # RuntimeObject.lib provides WINRT_IMPL_* symbols required by C++/WinRT
     target_link_libraries(mystral-runtime PRIVATE
         d3d11.lib
         dxgi.lib
         mfplat.lib
         mfuuid.lib
         mfreadwrite.lib
+        RuntimeObject.lib
     )
     # C++/WinRT needs /await for coroutine support
     target_compile_options(mystral-runtime PRIVATE /await)
