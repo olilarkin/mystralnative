@@ -12,6 +12,7 @@
 #include "mystral/audio/audio_bindings.h"
 #include "mystral/vfs/embedded_bundle.h"
 #include "mystral/async/event_loop.h"
+#include "storage/local_storage.h"
 
 // Ray tracing bindings (conditional)
 #ifdef MYSTRAL_HAS_RAYTRACING
@@ -413,6 +414,9 @@ public:
 
         // Set up DOM event system (document, window, addEventListener, etc.)
         setupDOMEvents();
+
+        // Set up localStorage/sessionStorage (file-backed persistence)
+        setupStorage();
 
         // Set up native GLTF loading API
         // This provides loadGLTF() for loading .glb/.gltf files from local paths
@@ -1259,6 +1263,185 @@ private:
         jsEngine_->setProperty(process, "env", env);
 
         jsEngine_->setGlobalProperty("process", process);
+    }
+
+    void setupStorage() {
+        if (!jsEngine_) return;
+
+        // Initialize localStorage backed by a JSON file
+        // Storage file is keyed by the current working directory name
+        std::string storageDir = storage::LocalStorage::getStorageDirectory();
+        std::string cwdStem = std::filesystem::current_path().filename().string();
+        std::string filename = storage::LocalStorage::deriveStorageFilename(cwdStem);
+        std::string storagePath = storageDir + "/" + filename;
+
+        localStorage_.init(storagePath);
+        std::cout << "[Mystral] localStorage initialized: " << storagePath << std::endl;
+
+        // Register native C++ functions that the JS polyfill will call
+
+        // __storageGetItem(key) -> string | null
+        jsEngine_->setGlobalProperty("__storageGetItem",
+            jsEngine_->newFunction("__storageGetItem", [this](void* ctx, const std::vector<js::JSValueHandle>& args) {
+                if (args.empty()) return jsEngine_->newNull();
+                std::string key = jsEngine_->toString(args[0]);
+                if (!localStorage_.has(key)) {
+                    return jsEngine_->newNull();
+                }
+                return jsEngine_->newString(localStorage_.getItem(key).c_str());
+            })
+        );
+
+        // __storageSetItem(key, value)
+        jsEngine_->setGlobalProperty("__storageSetItem",
+            jsEngine_->newFunction("__storageSetItem", [this](void* ctx, const std::vector<js::JSValueHandle>& args) {
+                if (args.size() < 2) return jsEngine_->newUndefined();
+                std::string key = jsEngine_->toString(args[0]);
+                std::string value = jsEngine_->toString(args[1]);
+                localStorage_.setItem(key, value);
+                return jsEngine_->newUndefined();
+            })
+        );
+
+        // __storageRemoveItem(key)
+        jsEngine_->setGlobalProperty("__storageRemoveItem",
+            jsEngine_->newFunction("__storageRemoveItem", [this](void* ctx, const std::vector<js::JSValueHandle>& args) {
+                if (args.empty()) return jsEngine_->newUndefined();
+                std::string key = jsEngine_->toString(args[0]);
+                localStorage_.removeItem(key);
+                return jsEngine_->newUndefined();
+            })
+        );
+
+        // __storageClear()
+        jsEngine_->setGlobalProperty("__storageClear",
+            jsEngine_->newFunction("__storageClear", [this](void* ctx, const std::vector<js::JSValueHandle>& args) {
+                localStorage_.clear();
+                return jsEngine_->newUndefined();
+            })
+        );
+
+        // __storageKey(index) -> string | null
+        jsEngine_->setGlobalProperty("__storageKey",
+            jsEngine_->newFunction("__storageKey", [this](void* ctx, const std::vector<js::JSValueHandle>& args) {
+                if (args.empty()) return jsEngine_->newNull();
+                int index = static_cast<int>(jsEngine_->toNumber(args[0]));
+                if (index < 0 || index >= localStorage_.length()) {
+                    return jsEngine_->newNull();
+                }
+                return jsEngine_->newString(localStorage_.key(index).c_str());
+            })
+        );
+
+        // __storageLength() -> number
+        jsEngine_->setGlobalProperty("__storageLength",
+            jsEngine_->newFunction("__storageLength", [this](void* ctx, const std::vector<js::JSValueHandle>& args) {
+                return jsEngine_->newNumber(static_cast<double>(localStorage_.length()));
+            })
+        );
+
+        // JavaScript polyfill that creates localStorage and sessionStorage globals
+        const char* storagePolyfill = R"JS(
+// localStorage - backed by native C++ file storage
+(function() {
+    function createStorage(nativeBacked) {
+        // In-memory store for sessionStorage (or fallback)
+        var memStore = {};
+        var memKeys = [];
+
+        var storage = {
+            getItem: function(key) {
+                key = String(key);
+                if (nativeBacked) {
+                    return __storageGetItem(key);
+                }
+                return memStore.hasOwnProperty(key) ? memStore[key] : null;
+            },
+            setItem: function(key, value) {
+                key = String(key);
+                value = String(value);
+                if (nativeBacked) {
+                    __storageSetItem(key, value);
+                } else {
+                    if (!memStore.hasOwnProperty(key)) {
+                        memKeys.push(key);
+                    }
+                    memStore[key] = value;
+                }
+            },
+            removeItem: function(key) {
+                key = String(key);
+                if (nativeBacked) {
+                    __storageRemoveItem(key);
+                } else {
+                    if (memStore.hasOwnProperty(key)) {
+                        delete memStore[key];
+                        var idx = memKeys.indexOf(key);
+                        if (idx !== -1) memKeys.splice(idx, 1);
+                    }
+                }
+            },
+            clear: function() {
+                if (nativeBacked) {
+                    __storageClear();
+                } else {
+                    memStore = {};
+                    memKeys = [];
+                }
+            },
+            key: function(index) {
+                if (nativeBacked) {
+                    return __storageKey(index);
+                }
+                return index >= 0 && index < memKeys.length ? memKeys[index] : null;
+            },
+            get length() {
+                if (nativeBacked) {
+                    return __storageLength();
+                }
+                return memKeys.length;
+            }
+        };
+
+        // Wrap with Proxy for bracket access (localStorage['key'] and localStorage.key)
+        if (typeof Proxy !== 'undefined') {
+            return new Proxy(storage, {
+                get: function(target, prop) {
+                    // Return own methods/properties first
+                    if (prop in target) return target[prop];
+                    if (typeof prop === 'symbol') return undefined;
+                    // Treat as getItem
+                    return target.getItem(prop);
+                },
+                set: function(target, prop, value) {
+                    // Don't intercept known method names
+                    if (prop === 'getItem' || prop === 'setItem' || prop === 'removeItem' ||
+                        prop === 'clear' || prop === 'key' || prop === 'length') {
+                        return false;
+                    }
+                    if (typeof prop === 'symbol') return false;
+                    target.setItem(prop, value);
+                    return true;
+                },
+                deleteProperty: function(target, prop) {
+                    target.removeItem(prop);
+                    return true;
+                }
+            });
+        }
+
+        return storage;
+    }
+
+    // localStorage: backed by native C++ file storage (persistent)
+    globalThis.localStorage = createStorage(true);
+
+    // sessionStorage: in-memory only (cleared when app closes)
+    globalThis.sessionStorage = createStorage(false);
+})();
+)JS";
+
+        jsEngine_->eval(storagePolyfill, "storage-polyfill.js");
     }
 
     void setupFetch() {
@@ -2742,6 +2925,7 @@ globalThis.__mystralNativeDecodeDracoAsync = function(buffer, attrs) {
     std::unique_ptr<webgpu::Context> webgpu_;
     std::unique_ptr<js::Engine> jsEngine_;
     std::unique_ptr<js::ModuleSystem> moduleSystem_;
+    storage::LocalStorage localStorage_;
 
     // requestAnimationFrame state
     struct RAFCallback {
